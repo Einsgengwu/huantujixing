@@ -1,0 +1,176 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>宦途疾行</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css?v=20260708c">
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game"></canvas>
+
+    <div id="screen-menu" class="screen overlay-ui">
+      <div class="panel menu-panel">
+        <section class="menu-main">
+          <div class="menu-copy">
+            <h1>宦途疾行</h1>
+            <p class="sub">庆历进士 · 三格官道 · 四线升迁</p>
+            <p class="menu-desc">鼠标或手指跟随绯袍小官，碰触红色奏章升官，拾封赏与功劳积满可补升官阶，避开蓝色谪令与黑色诏狱。四线顶格后抢黄袍入终局，六分钟见一生沉浮。</p>
+            <label class="name-label">姓名
+              <span class="name-row">
+                <input type="text" id="player-name" value="" maxlength="18" autocomplete="off">
+                <button type="button" id="btn-random-name" class="btn-mini">随机</button>
+                <span id="name-feedback" class="name-feedback" aria-live="polite"></span>
+              </span>
+            </label>
+            <label class="difficulty-label">难度
+              <select id="difficulty">
+                <option value="easy">平易</option>
+                <option value="normal" selected>中庸</option>
+                <option value="hard">严苛</option>
+                <option value="hell">地狱</option>
+                <option value="boss-normal">Boss战体验 · 中庸</option>
+                <option value="boss-hell">Boss战体验 · 地狱</option>
+                <option value="boss-hell-direct">地狱伪帝挑战</option>
+              </select>
+            </label>
+            <div class="menu-actions">
+              <button type="button" id="btn-start" class="btn-primary">开跑</button>
+              <button type="button" id="btn-guide" class="btn-secondary">玩法引导</button>
+              <button type="button" id="btn-codex" class="btn-secondary">典故图鉴</button>
+              <button type="button" id="btn-game-info" class="btn-secondary">游戏说明</button>
+              <button type="button" id="btn-version-log" class="btn-secondary">更新日志</button>
+            </div>
+            <p class="hint hint-mouse">鼠标跟随 · 碰触拾取（奏章同） · P 暂停</p>
+            <p class="hint hint-touch hidden">触屏跟随移动 · 碰触拾取 · 点右上角暂停</p>
+            <p id="load-hint" class="load-hint"></p>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="screen-hud" class="screen">
+      <button type="button" id="btn-pause" class="btn-pause" title="暂停 (P)">暂停</button>
+    </div>
+
+    <div id="screen-tutorial" class="screen overlay-ui tutorial-screen hidden">
+      <div class="panel tutorial-panel">
+        <button type="button" id="tutorial-skip" class="tutorial-skip">跳过</button>
+        <p id="tutorial-progress" class="tutorial-progress">1 / 4</p>
+        <div id="tutorial-scene" class="tutorial-scene" aria-hidden="true"></div>
+        <h2 id="tutorial-title">移动</h2>
+        <p id="tutorial-body" class="tutorial-body"></p>
+        <p id="tutorial-continue" class="tutorial-continue">点击继续</p>
+      </div>
+    </div>
+
+    <div id="screen-pause" class="screen overlay-ui hidden">
+      <div class="panel pause-panel">
+        <h2>稍憩</h2>
+        <p class="sub">摸魁岸，且歇片刻</p>
+        <button type="button" id="btn-resume" class="btn-primary">继续宦途</button>
+        <button type="button" id="btn-quit" class="btn-secondary">退出对局</button>
+      </div>
+    </div>
+
+    <div id="screen-end" class="screen overlay-ui hidden">
+      <div class="panel end-panel scroll-panel">
+        <div class="scroll-rod scroll-rod-top"></div>
+        <div class="scroll-viewport" id="scroll-viewport">
+          <div class="scroll-track" id="scroll-track"></div>
+        </div>
+        <div class="scroll-rod scroll-rod-bottom"></div>
+        <p id="scroll-hint" class="scroll-hint hidden">← 左右拖动阅卷 · 升官图 →</p>
+        <div class="scroll-actions">
+          <button type="button" id="btn-retry" class="btn-primary">再赴宦途</button>
+          <button type="button" id="btn-codex-end" class="btn-secondary">图鉴</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-codex" class="modal hidden">
+    <div class="modal-inner modal-codex-inner">
+      <h3>典故图鉴</h3>
+      <div id="codex-body"></div>
+      <button type="button" class="modal-close btn-secondary">关闭</button>
+    </div>
+  </div>
+
+  <div id="modal-codex-preview" class="modal codex-preview-modal hidden" role="dialog" aria-modal="true" aria-labelledby="codex-preview-caption">
+    <div class="codex-preview-inner">
+      <button type="button" class="modal-close codex-preview-close" aria-label="关闭大图">×</button>
+      <img id="codex-preview-image" alt="">
+      <p id="codex-preview-caption"></p>
+    </div>
+  </div>
+
+  <div id="modal-game-info" class="modal hidden">
+    <div class="modal-inner modal-game-info-inner">
+      <h3>宦 途 疾 行 · 游戏说明</h3>
+      <div class="game-info-body">
+        <section class="game-info-section">
+          <h4>玩法</h4>
+          <p>你是一名庆历进士，在三条官道间疾行。碰触红色卷轴升官，蓝色卷轴降阶，黑色诏狱会直接断送仕途；金色奏章会触发利好事件。</p>
+          <div class="game-info-notes">
+            <p><strong>封赏</strong>来自赏钱、犒赏与恩赐，积满后随机补升一路仍可晋升的官职，像朝廷忽然加恩。</p>
+            <p><strong>功劳</strong>来自军功、考绩与功簿，积满后优先补升当前最低的一路官职，适合稳住短板。</p>
+          </div>
+          <p>六分钟任期内尽量提高四线官职。四线顶格后会出现黄袍终局，可选择冲击登基结局；若不取黄袍，则以位极人臣收卷。</p>
+        </section>
+        <section class="game-info-section">
+          <h4>四线官职阶梯</h4>
+          <div id="rank-ladder-info" class="rank-ladder-info"></div>
+        </section>
+      </div>
+      <button type="button" class="modal-close btn-secondary">关闭</button>
+    </div>
+  </div>
+
+  <div id="modal-version-log" class="modal hidden">
+    <div class="modal-inner modal-version-log-inner">
+      <h3>宦 途 疾 行 · 版本日志</h3>
+      <div id="version-log-body" class="version-log-body"></div>
+      <div class="version-log-actions">
+        <button type="button" id="btn-version-prev" class="btn-secondary">上一周</button>
+        <button type="button" id="btn-version-next" class="btn-secondary">下一周</button>
+      </div>
+      <button type="button" class="modal-close btn-secondary">关闭</button>
+    </div>
+  </div>
+
+
+  <script src="js/data/game-data.js?v=20260705a"></script>
+  <script src="js/codex-images.js?v=20260708h"></script>
+  <script src="js/codex-art.js?v=20260707i"></script>
+  <script src="js/data-load.js?v=20260701e"></script>
+  <script src="js/lanes.js?v=20260701e"></script>
+  <script src="js/pickup-fx.js?v=20260701e"></script>
+  <script src="js/input.js?v=20260701e"></script>
+  <script src="js/player.js?v=20260701e"></script>
+  <script src="js/difficulty.js?v=20260701e"></script>
+  <script src="js/impeachment.js?v=20260703b"></script>
+  <script src="js/ai-move.js?v=20260701e"></script>
+  <script src="js/npcs.js?v=20260703b"></script>
+  <script src="js/rivals.js?v=20260703b"></script>
+  <script src="js/exit-reasons.js?v=20260701e"></script>
+  <script src="js/ranks.js?v=20260701e"></script>
+  <script src="js/storage.js?v=20260701e"></script>
+  <script src="js/names.js?v=20260704a"></script>
+  <script src="js/obstacle-events.js?v=20260701e"></script>
+  <script src="js/spawner.js?v=20260704f"></script>
+  <script src="js/events.js?v=20260701e"></script>
+  <script src="js/renderer.js?v=20260706b"></script>
+  <script src="js/life-scroll.js?v=20260701e"></script>
+  <script src="js/coronation-battle.js?v=20260707d"></script>
+  <script src="js/coronation.js?v=20260701e"></script>
+  <script src="js/tutorial.js?v=20260705a"></script>
+  <script src="js/version-log.js?v=20260708a"></script>
+  <script src="js/main.js?v=20260708b"></script>
+</body>
+</html>

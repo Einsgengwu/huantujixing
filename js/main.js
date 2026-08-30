@@ -1,0 +1,1236 @@
+﻿/* 宦途疾行 · 主循环 */
+const GAME_DURATION = 360;
+const SPEED_MIN = 235;
+const SPEED_MAX = 880;
+const START_AGE = 24;
+const SECONDS_PER_YEAR = 8; // 9.6÷1.2，年齿增速为上一版 1.2 倍
+const AGE_DEATH_START = 51;
+const AGE_DEATH_RAMP = 66;
+const PANEL_W = 300;
+const HUD_TOP = 128;
+const HUD_TOP_MOBILE = 118;
+const HUANTU_VERSION = '1.0.2';
+
+const Game = (() => {
+  let canvas, ctx, input;
+  let cssW = 0;
+  let cssH = 0;
+  let dpr = 1;
+  let phase = 'menu';
+  let player, playerName = '沈砚青';
+  let timeLeft = GAME_DURATION;
+  let lastTs = 0;
+  let layout = {};
+  let endResult = null;
+  let audioCtx = null;
+  let paused = false;
+  let sessionNpcKnockouts = 0;
+  let robeRetryT = 0;
+  let bossPracticeMode = null;
+
+  function isMobileLayout() {
+    return window.matchMedia('(max-width: 900px)').matches;
+  }
+
+  function layoutUiScale() {
+    if (isMobileLayout()) return 1.1;
+    return Math.min(1.55, Math.max(1.3, cssW / 680));
+  }
+
+  function layoutPanelW() {
+    if (isMobileLayout()) return 0;
+    return Math.round(Math.max(240, Math.min(PANEL_W, cssW * 0.18)));
+  }
+
+  function layoutDpr() {
+    const raw = window.devicePixelRatio || 1;
+    if (isMobileLayout()) return Math.min(raw, 2);
+    return Math.min(Math.max(raw, 2), 3);
+  }
+
+  function layoutHudTop() {
+    const mobile = isMobileLayout();
+    const scale = mobile ? 1.1 : Math.min(1.55, Math.max(1.3, cssW / 680));
+    const measured = Renderer.measureHudHeight(mobile, scale);
+    const base = mobile ? HUD_TOP_MOBILE : HUD_TOP;
+    return Math.max(base, measured + u(6));
+  }
+
+  function u(px) {
+    const scale = isMobileLayout() ? 1.1 : Math.min(1.55, Math.max(1.3, cssW / 680));
+    return Math.round(px * scale);
+  }
+
+  function applyLayout() {
+    layout = Lanes.compute(cssW, cssH, layoutPanelW(), layoutHudTop(), {
+      mobile: isMobileLayout()
+    });
+    layout.isMobile = isMobileLayout();
+    layout.uiScale = layoutUiScale();
+  }
+
+  function updateControlHints() {
+    const touch = Input?.isTouchDevice?.() ?? false;
+    document.querySelectorAll('.hint-touch').forEach((el) => {
+      el.classList.toggle('hidden', !touch);
+    });
+    document.querySelectorAll('.hint-mouse').forEach((el) => {
+      el.classList.toggle('hidden', touch);
+    });
+    const pauseBtn = document.getElementById('btn-pause');
+    if (pauseBtn) pauseBtn.title = touch ? '暂停' : '暂停 (P)';
+  }
+
+  let ready = false;
+  let loadError = '';
+  let gameData = null;
+
+  function setPhaseClass() {
+    const wrap = document.getElementById('wrap');
+    if (!wrap) return;
+    wrap.classList.remove('phase-menu', 'phase-play', 'phase-end');
+    wrap.classList.add('phase-' + phase);
+    document.body.classList.toggle('game-playing', phase === 'play');
+    if (phase === 'play') window.scrollTo(0, 0);
+  }
+
+  function bindUi() {
+    Tutorial.bind();
+    VersionLog?.bind?.();
+    const diffEl = document.getElementById('difficulty');
+    diffEl?.addEventListener('change', updateDifficultyHint);
+    updateDifficultyHint();
+    document.getElementById('btn-start')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      tryStart();
+    });
+    document.getElementById('btn-random-name')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      fillRandomName();
+    });
+    document.getElementById('player-name')?.addEventListener('input', () => {
+      setNameFeedback('');
+      setLoadHint('');
+    });
+    document.getElementById('btn-guide')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      Tutorial.begin();
+    });
+    document.getElementById('btn-codex')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      showCodex();
+    });
+    document.getElementById('btn-game-info')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      showGameInfo();
+    });
+    document.getElementById('btn-retry')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      phase = 'menu';
+      bossPracticeMode = null;
+      showScreen('menu');
+      document.getElementById('screen-menu')?.classList.remove('hidden');
+      setPhaseClass();
+    });
+    document.getElementById('btn-codex-end')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      showCodex();
+    });
+    document.getElementById('codex-body')?.addEventListener('click', (e) => {
+      const trigger = e.target.closest?.('.codex-preview-trigger');
+      if (!trigger) return;
+      e.preventDefault();
+      openCodexPreview(trigger.dataset.codexImage, trigger.dataset.codexTitle);
+    });
+    document.getElementById('modal-codex-preview')?.addEventListener('click', (e) => {
+      if (e.target.id === 'modal-codex-preview' || e.target.classList.contains('modal-close')) {
+        closeCodexPreview();
+      }
+    });
+    document.getElementById('btn-pause')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (phase === 'play') togglePause(true);
+    });
+    document.getElementById('btn-resume')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      togglePause(false);
+    });
+    document.getElementById('btn-quit')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      quitToMenu();
+    });
+    window.addEventListener('keydown', (e) => {
+      if (Tutorial.isActive()) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          Tutorial.advance();
+        }
+        return;
+      }
+      if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
+        if (!document.getElementById('modal-codex-preview')?.classList.contains('hidden')) {
+          closeCodexPreview();
+          return;
+        }
+        if (phase === 'play') togglePause(!paused);
+      }
+    });
+  }
+
+  function updateDifficultyHint() {
+    const el = document.querySelector('.hint-mouse');
+    if (!el) return;
+    const diff = document.getElementById('difficulty')?.value || 'normal';
+    const base = '鼠标跟随 · 碰触拾取（奏章同） · P 暂停';
+    if (diff === 'hell') {
+      el.textContent = `${base} · 地狱：弹劾弹每2秒自动三连发`;
+    } else if (diff === 'boss-normal' || diff === 'boss-hell') {
+      el.textContent = `${base} · Boss战体验模式`;
+    } else if (diff === 'boss-hell-direct') {
+      el.textContent = `${base} · 地狱伪帝挑战：直入Boss`;
+    } else {
+      el.textContent = base;
+    }
+  }
+
+  function registerNpcKnockout() {
+    sessionNpcKnockouts += 1;
+  }
+
+  function tryUseAmnesty(label) {
+    if (!player || !(player.amnestyLeft > 0)) return false;
+    player.amnestyLeft = 0;
+    EventLog.showQuick('免死金牌', `挡下${label}`, 'promote');
+    return true;
+  }
+
+  function tickAmnesty(dt) {
+    if (!player || !(player.amnestyLeft > 0)) return;
+    player.amnestyLeft -= dt;
+    if (player.amnestyLeft <= 0) {
+      player.amnestyLeft = 0;
+      EventLog.showQuick('免死金牌', '逾期未用，作废', 'demote');
+    }
+  }
+
+  function togglePause(on) {
+    if (phase !== 'play') return;
+    paused = on;
+    const el = document.getElementById('screen-pause');
+    if (el) el.classList.toggle('hidden', !paused);
+  }
+
+  function quitToMenu() {
+    paused = false;
+    phase = 'menu';
+    bossPracticeMode = null;
+    EventLog.closeDetail?.();
+    document.getElementById('screen-pause')?.classList.add('hidden');
+    showScreen('menu');
+    document.getElementById('screen-menu')?.classList.remove('hidden');
+    setPhaseClass();
+  }
+
+  function setLoadHint(message) {
+    const el = document.getElementById('load-hint');
+    if (el) el.textContent = message || '';
+  }
+
+  function setNameFeedback(message, kind = 'error') {
+    const el = document.getElementById('name-feedback');
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('visible', !!message);
+    el.classList.toggle('is-ok', kind === 'ok');
+    el.classList.toggle('is-checking', kind === 'checking');
+  }
+
+
+  function fillRandomName() {
+    const input = document.getElementById('player-name');
+    if (!input) return;
+    input.value = HuantuNames.random();
+    setLoadHint('');
+    setNameFeedback('');
+  }
+
+  function tryStart() {
+    if (!ready) {
+      setLoadHint(loadError || '数据加载中，请稍候…');
+      setNameFeedback('');
+      return;
+    }
+    const nameInput = document.getElementById('player-name');
+    const validation = HuantuNames.validate(nameInput?.value || '');
+    if (!validation.ok) {
+      setLoadHint('');
+      setNameFeedback(validation.message);
+      return;
+    }
+    if (nameInput) nameInput.value = validation.name;
+    setLoadHint('');
+    setNameFeedback('');
+    startFromMenu();
+  }
+
+  function showLoadError(msg) {
+    loadError = msg;
+    const el = document.getElementById('load-hint');
+    if (el) el.textContent = msg;
+  }
+
+  async function init() {
+    bindUi();
+    canvas = document.getElementById('game');
+    ctx = canvas.getContext('2d');
+    resize();
+    window.addEventListener('resize', resize);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', resize);
+      window.visualViewport.addEventListener('scroll', resize);
+    }
+
+    try {
+      const data = await DataLoad.loadAll();
+      gameData = data;
+      await Ranks.load(data);
+      await Spawner.load(data);
+      await EventLog.load(data);
+      ready = true;
+      showLoadError('');
+      fillRandomName();
+    } catch (e) {
+      console.error('宦途疾行加载失败', e);
+      showLoadError('加载失败：' + (e.message || '请刷新页面重试'));
+    }
+
+    applyLayout();
+    input = Input.init(canvas);
+    input.setDefault(
+      layout.trackLeft + layout.trackWidth / 2,
+      layout.playTop + layout.playHeight - 56
+    );
+    updateControlHints();
+
+    canvas.addEventListener('click', onCanvasClick);
+
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (_) { /* 古琴 ambient 占位 */ }
+
+    phase = 'menu';
+    showScreen('menu');
+    setPhaseClass();
+    requestAnimationFrame(loop);
+  }
+
+  function resize() {
+    const wrap = document.getElementById('wrap');
+    const vp = window.visualViewport;
+    const mobile = isMobileLayout();
+    dpr = layoutDpr();
+    cssW = Math.round(mobile ? (wrap?.clientWidth || window.innerWidth) : window.innerWidth);
+    cssH = Math.round(mobile && vp?.height ? vp.height : window.innerHeight);
+    if (cssH < 400) cssH = Math.max(400, window.innerHeight);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    applyLayout();
+    updateControlHints();
+  }
+
+  function showScreen(id) {
+    ['menu', 'hud', 'end'].forEach((s) => {
+      const el = document.getElementById('screen-' + s);
+      if (el) el.classList.toggle('hidden', s !== id);
+    });
+    if (id === 'menu' || id === 'end') {
+      const el = document.getElementById('screen-' + id);
+      if (el) requestAnimationFrame(() => { el.scrollTop = 0; });
+    }
+  }
+
+  function parseModeSelection(value) {
+    if (value === 'boss-normal') {
+      return { difficulty: 'normal', bossPractice: true, label: 'Boss战体验 · 中庸' };
+    }
+    if (value === 'boss-hell') {
+      return { difficulty: 'hell', bossPractice: true, label: 'Boss战体验 · 地狱' };
+    }
+    if (value === 'boss-hell-direct') {
+      return { difficulty: 'hell', bossPractice: true, bossDirect: true, label: '地狱伪帝挑战' };
+    }
+    return { difficulty: value || 'normal', bossPractice: false, label: null };
+  }
+
+  function startFromMenu() {
+    const nameInput = document.getElementById('player-name');
+    playerName = (nameInput?.value || '沈砚青').trim() || '沈砚青';
+    const diffEl = document.getElementById('difficulty');
+    const mode = parseModeSelection(diffEl?.value || 'normal');
+    Difficulty.set(mode.difficulty);
+    bossPracticeMode = mode.bossPractice ? mode.label : null;
+    startGame({ bossPractice: mode.bossPractice, bossDirect: mode.bossDirect });
+  }
+
+  function enterCoronationBattle(options = {}) {
+    Coronation.startChallenge();
+    Spawner.enterCoronationMode();
+    CoronationBattle.start(layout, Npcs.getList(), Rivals.getList(), {
+      hellPracticeAssist: !!bossPracticeMode && Difficulty.isHell()
+    });
+    if (options.bossDirect) CoronationBattle.skipToBossPhase(layout);
+    Npcs.reset();
+    Rivals.reset();
+  }
+
+  function startGame(options = {}) {
+    Ranks.reset();
+    Spawner.reset();
+    Npcs.reset();
+    Rivals.reset();
+    Coronation.reset();
+    CoronationBattle.reset();
+    Impeachment.reset();
+    EventLog.reset();
+    sessionNpcKnockouts = 0;
+    robeRetryT = 0;
+    Npcs.setOnKnockout(registerNpcKnockout);
+    Rivals.setOnKnockout(registerNpcKnockout);
+    timeLeft = GAME_DURATION;
+    endResult = null;
+    paused = false;
+    document.getElementById('screen-pause')?.classList.add('hidden');
+    input.resetActive();
+    player = Player.create(
+      layout,
+      layout.playTop + layout.playHeight - 56
+    );
+    input.setDefault(player.x, player.y);
+    Npcs.seed(layout);
+    Rivals.seed(layout);
+    const startInBossPractice = !!options.bossPractice;
+    phase = 'play';
+    showScreen('hud');
+    document.getElementById('screen-menu').classList.add('hidden');
+    setPhaseClass();
+    if (startInBossPractice) {
+      const directBoss = !!options.bossDirect;
+      enterCoronationBattle({ bossDirect: directBoss });
+      EventLog.showQuick(
+        directBoss ? '地狱伪帝挑战' : 'Boss战体验',
+        directBoss ? '直入伪帝御前；本局不入榜' : '八轮对战后直入逼宫；本局不入榜',
+        'promote'
+      );
+    }
+    playAmbientPing();
+  }
+
+  function playAmbientPing() {
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'sine';
+    o.frequency.value = 220;
+    g.gain.value = 0.03;
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.2);
+    o.stop(audioCtx.currentTime + 1.2);
+  }
+
+  function getSpeed() {
+    if (Coronation.isActive()) return SPEED_MAX;
+    const progress = getProgress() * 0.5;
+    const curve = Math.pow(progress, 0.85) * 0.32 + Math.pow(progress, 3.6) * 0.68;
+    const rankBoost = Ranks.benguanLevel() * 3.8;
+    return SPEED_MIN + (SPEED_MAX - SPEED_MIN) * curve + rankBoost;
+  }
+
+  function getProgress() {
+    return 1 - timeLeft / GAME_DURATION;
+  }
+
+  function getPlayerAge() {
+    const elapsed = GAME_DURATION - timeLeft;
+    return START_AGE + Math.floor(elapsed / SECONDS_PER_YEAR);
+  }
+
+  function getAgeProgress() {
+    const elapsed = GAME_DURATION - timeLeft;
+    return (elapsed % SECONDS_PER_YEAR) / SECONDS_PER_YEAR;
+  }
+
+  function getAgeElapsedSeconds() {
+    const elapsed = GAME_DURATION - timeLeft;
+    return elapsed % SECONDS_PER_YEAR;
+  }
+
+  function formatTenureLeft() {
+    if (Coronation.isActive()) {
+      const hud = CoronationBattle.getHud();
+      if (CoronationBattle.isBossPhase() || CoronationBattle.isBossBridgePhase()) {
+        const boss = hud.bossActive;
+        if (boss) return `帝${(hud.bossMaxHits || 80) - (hud.bossHits || 0)}`;
+        if (CoronationBattle.isBossBridgePhase()) return '伪帝';
+        return '…';
+      }
+      return `敌${hud.enemiesLeft}`;
+    }
+    const sec = Math.max(0, Math.ceil(timeLeft));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function getAgeDeathChancePerSecond(age) {
+    if (age < AGE_DEATH_START) return 0;
+    const t = Math.min(1, (age - AGE_DEATH_START) / (AGE_DEATH_RAMP - AGE_DEATH_START));
+    const curve = Math.pow(t, 2.1);
+    return 0.0006 + curve * 0.014;
+  }
+
+  function tenureHudLabel() {
+    if (!Coronation.isActive()) return '任期余';
+    if (CoronationBattle.isBossPhase()) return '逼宫余';
+    if (CoronationBattle.isBossBridgePhase()) return '殿门';
+    return '八阵余';
+  }
+
+  function isAwaitingCoronationRobe() {
+    return Coronation.isOffered() && !Coronation.isPicked() && !Coronation.isActive();
+  }
+
+  function tryOfferCoronation() {
+    if (!Ranks.isGrandWin() || Coronation.isOffered()) return;
+    Coronation.offer();
+    robeRetryT = 0;
+    Spawner.spawnCoronationRobe(layout);
+    EventLog.showQuick('黄袍加身', '四线顶格！碰触金黄袍服，直入逼宫终局……', 'promote');
+  }
+
+  function ensureCoronationRobe(dt) {
+    if (!isAwaitingCoronationRobe()) return;
+    if (Spawner.getCoronationRobe()) return;
+    robeRetryT -= dt;
+    if (robeRetryT > 0) return;
+    Spawner.spawnCoronationRobe(layout);
+    robeRetryT = 2.4;
+  }
+
+  function handleCoronationRobe() {
+    const robe = Spawner.getCoronationRobe();
+    if (!robe || Coronation.isPicked()) return;
+    const pb = Player.hitbox(player);
+    const pad = 14;
+    const bob = Math.sin(robe.pulse || 0) * 4;
+    const box = {
+      x: robe.x - robe.w / 2 - pad,
+      y: robe.y + bob - robe.h / 2 - pad,
+      w: robe.w + pad * 2,
+      h: robe.h + pad * 2
+    };
+    if (!Renderer.aabb(pb, box)) return;
+    Spawner.removeCoronationRobe();
+    enterCoronationBattle();
+    EventLog.showQuick('黄袍加身', '同僚拱卫！八阵破敌，殿门逼宫！', 'promote');
+  }
+
+  function resolveEndOutcome(type, reason) {
+    if (Coronation.isPicked() && type === 'fail') {
+      return { type: 'traitor', reason: '乱臣贼子' };
+    }
+    if (type === 'time' && Ranks.isGrandWin() && !Coronation.isPicked()) {
+      return { type: 'minister', reason: '位极人臣' };
+    }
+    if (type === 'emperor') {
+      return { type: 'emperor', reason: '登基称帝' };
+    }
+    return { type, reason };
+  }
+
+  function checkAgeMortality(dt) {
+    if (Coronation.isActive() || isAwaitingCoronationRobe()) return false;
+    const age = getPlayerAge();
+    const chance = getAgeDeathChancePerSecond(age);
+    if (chance <= 0) return false;
+    if (Math.random() >= chance * dt) return false;
+    const reasons = ['卒于任所', '突发急症', '心力交瘁', '客死途中', '病逝任所'];
+    endGame('fail', reasons[Math.floor(Math.random() * reasons.length)]);
+    return true;
+  }
+
+  function checkVitals() {
+    if (player.safety <= 0) {
+      endGame('fail', '安危尽失');
+      return true;
+    }
+    if (player.integrity <= 0) {
+      endGame('fail', '气节尽毁');
+      return true;
+    }
+    return false;
+  }
+
+  function applyVitalsDelta(safety, integrity) {
+    if (safety) player.safety = Math.max(0, Math.min(100, player.safety + safety));
+    if (integrity) player.integrity = Math.max(0, Math.min(100, player.integrity + integrity));
+    return checkVitals();
+  }
+
+  function applyCoinValue(value, silent) {
+    player.distance += value;
+    player.coins = (player.coins || 0) + 1;
+    player.coinBank = (player.coinBank || 0) + value;
+    if (!silent) EventLog.showQuick('封赏', `+${value}（满则随机升官）`, 'coin');
+
+    const th = Ranks.getCoinThreshold();
+    while (player.coinBank >= th) {
+      player.coinBank -= th;
+      const track = Ranks.randomPromotableTrack();
+      if (!track) break;
+      Ranks.promote(track, 1);
+      const st = Ranks.getState().find((s) => s.track === track);
+      EventLog.showQuick('封赏升官', `${st.label} → ${st.current.name}`, 'promote');
+    }
+    applyVitalsDelta(0, 2);
+    checkVitals();
+  }
+
+  function applyMeritValue(value, silent) {
+    player.meritBank = (player.meritBank || 0) + value;
+    if (!silent) EventLog.showQuick('功劳', `+${value}（满则升最低官）`, 'merit');
+
+    const th = Ranks.getMeritThreshold();
+    while (player.meritBank >= th) {
+      player.meritBank -= th;
+      const track = Ranks.lowestPromotableTrack();
+      if (!track) break;
+      Ranks.promote(track, 1);
+      const st = Ranks.getState().find((s) => s.track === track);
+      EventLog.showQuick('功劳升官', `${st.label} → ${st.current.name}`, 'promote');
+    }
+    applyVitalsDelta(2, 4);
+    checkVitals();
+  }
+
+  function applyObstacleEvent(o, silent) {
+    const label = o.eventLabel || o.brief || o.name;
+    const kind = o.eventPolarity === 'good' ? 'promote' : 'demote';
+
+    if (o.safety || o.integrity) {
+      applyVitalsDelta(o.safety || 0, o.integrity || 0);
+    }
+    if (o.merit) applyMeritValue(o.merit, true);
+    if (o.coin) applyCoinValue(o.coin, true);
+
+    if (o.promoteTrack && o.promoteSteps) {
+      Ranks.promote(o.promoteTrack, o.promoteSteps);
+      if (!silent) EventLog.showQuick(o.name, label, 'promote');
+      checkVitals();
+      return;
+    }
+
+    if (o.demoteTrack && o.demoteSteps) {
+      const res = Ranks.demote(o.demoteTrack, o.demoteSteps);
+      if (!res.ok) {
+        if (tryUseAmnesty('谪尽')) {
+          if (!silent) EventLog.showQuick(o.name, label, 'demote');
+          checkVitals();
+          return;
+        }
+        endGame('fail', res.reason);
+        return;
+      }
+      if (!silent) EventLog.showQuick(o.name, label, 'demote');
+      checkVitals();
+      return;
+    }
+
+    if (!silent) EventLog.showQuick(o.name, label, kind);
+    checkVitals();
+  }
+
+  function resolveSpecial(s) {
+    ObstacleEvents.resolveOnContact(s, getProgress());
+    const sub = `${s.eventIcon} ${s.eventLabel}`;
+    EventLog.showQuick(s.name, sub, 'promote');
+    applyObstacleEvent(s, true);
+    Spawner.removeSpecial(s);
+  }
+
+  function handleSpecial(s) {
+    const pb = Player.hitbox(player);
+    const pad = 12;
+    const bob = Math.sin(s.pulse || 0) * 3;
+    const cy = s.y + bob;
+    const box = {
+      x: s.x - s.w / 2 - pad,
+      y: cy - s.h / 2 - pad,
+      w: s.w + pad * 2,
+      h: s.h + pad * 2
+    };
+    if (!Renderer.aabb(pb, box)) return;
+    resolveSpecial(s);
+  }
+
+  function handleObstacle(o) {
+    if (player.invincible > 0) return;
+
+    const pb = Player.hitbox(player);
+    const ob = { x: o.x - o.w / 2, y: o.y - o.h / 2, w: o.w, h: o.h };
+    if (!Renderer.aabb(pb, ob)) return;
+
+    Spawner.removeObstacle(o);
+    player.invincible = 1;
+
+    if (o.tier === 3) {
+      if (tryUseAmnesty('诏狱')) return;
+      endGame('fail', ExitReasons.pickPrisonExit(getPlayerAge()));
+      return;
+    }
+
+    applyVitalsDelta(-Math.round((o.damage || 15) * (1 + getProgress() * 0.5)), -8);
+  }
+
+  function handlePickup(p) {
+    const pb = Player.hitbox(player);
+    const box = { x: p.x - p.w / 2, y: p.y - p.h / 2, w: p.w, h: p.h };
+    if (!Renderer.aabb(pb, box)) return;
+
+    if (p.meritValue) {
+      Spawner.removePickup(p);
+      applyMeritValue(p.meritValue);
+      return;
+    }
+    if (p.coinValue) {
+      Spawner.removePickup(p);
+      applyCoinValue(p.coinValue);
+      return;
+    }
+
+    if (p.color === 'blue' && p.steps > 0 && player.amnestyLeft > 0) {
+      Spawner.removePickup(p);
+      tryUseAmnesty('贬谪');
+      return;
+    }
+
+    const result = Ranks.applyPickup(p);
+    Spawner.removePickup(p);
+
+    if (result.gameOver) {
+      if (tryUseAmnesty('谪尽')) return;
+      endGame('fail', result.reason);
+      return;
+    }
+    if (result.blocked) {
+      EventLog.showQuick(p.name, `${Ranks.LABELS[p.track]}未授，谪罚不及`);
+      return;
+    }
+
+    const effect = PickupFx.effectLabel(p);
+    if (result.applied.length) {
+      EventLog.addPickup(p);
+    } else if (PickupFx.resolveSteps(p) > 0) {
+      EventLog.showQuick(p.name, effect);
+      return;
+    } else {
+      EventLog.addPickup(p);
+    }
+
+    if (result.vitals) applyVitalsDelta(result.vitals.safety, result.vitals.integrity);
+  }
+
+  function handleCoin(c) {
+    const pb = Player.hitbox(player);
+    const box = { x: c.x - c.w / 2, y: c.y - c.h / 2, w: c.w, h: c.h };
+    if (!Renderer.aabb(pb, box)) return;
+    Spawner.removeCoin(c);
+    applyCoinValue(c.value);
+  }
+
+  function handleMerit(m) {
+    const pb = Player.hitbox(player);
+    const box = { x: m.x - m.w / 2, y: m.y - m.h / 2, w: m.w, h: m.h };
+    if (!Renderer.aabb(pb, box)) return;
+    Spawner.removeMerit(m);
+    applyMeritValue(m.value);
+  }
+
+  function handleAmnesty(a) {
+    if (player.amnestyLeft > 0) return;
+    const pb = Player.hitbox(player);
+    const box = { x: a.x - a.w / 2, y: a.y - a.h / 2, w: a.w, h: a.h };
+    if (!Renderer.aabb(pb, box)) return;
+    Spawner.removeAmnesty(a);
+    player.amnestyLeft = 20;
+    EventLog.showQuick('免死金牌', '20秒内可挡贬谪或出局一次', 'promote');
+  }
+
+  function buildLifeScroll(type, reason) {
+    const r = {
+      name: playerName,
+      age: getPlayerAge(),
+      ranks: Ranks.snapshot(),
+      grandWin: Ranks.isGrandWin(),
+      coronationPicked: Coronation.isPicked(),
+      codex: EventLog.getCodex(),
+      safety: player.safety,
+      integrity: player.integrity,
+      type,
+      reason
+    };
+    const bg = r.ranks.benguan?.name || '白身';
+    const saved = Storage.load();
+    const scrollBase = {
+      title: '',
+      subtitle: `庆历 ${r.name} 人生卷轴`,
+      meta: `年齿 ${r.age} 岁 · 功 ${Math.round(player.meritBank || 0)}`,
+      name: r.name,
+      age: r.age,
+      safety: r.safety,
+      integrity: r.integrity,
+      type,
+      reason: type === 'fail' ? ExitReasons.fitReason(reason, r.age) : (reason || null),
+      grandWin: r.grandWin,
+      coronationPicked: r.coronationPicked,
+      ranks: r.ranks,
+      npcKnockouts: sessionNpcKnockouts,
+      totalNpcKnockouts: (saved.achievements?.npcKnockouts || 0) + sessionNpcKnockouts
+    };
+    const ending = LifeScroll.buildEnding(scrollBase);
+    return {
+      ...scrollBase,
+      title: ending.title,
+      lines: ending.epilogue,
+      seal: ending.seal
+    };
+  }
+
+  function endGame(type, reason) {
+    if (phase === 'end') return;
+    const outcome = resolveEndOutcome(type, reason);
+    type = outcome.type;
+    reason = outcome.reason;
+    phase = 'end';
+    const grandWin = Ranks.isGrandWin();
+    endResult = {
+      type,
+      reason,
+      distance: player.distance,
+      age: getPlayerAge(),
+      ageElapsedSeconds: getAgeElapsedSeconds(),
+      totalElapsedSeconds: GAME_DURATION - timeLeft,
+      ranks: Ranks.snapshot(),
+      grandWin,
+      coronationPicked: Coronation.isPicked(),
+      codex: EventLog.getCodex(),
+      name: playerName,
+      difficulty: Difficulty.get().id,
+      npcKnockouts: sessionNpcKnockouts,
+      bossPractice: !!bossPracticeMode,
+      scroll: buildLifeScroll(type, reason)
+    };
+    if (!bossPracticeMode) {
+      Storage.mergeRun(endResult);
+    }
+    showEndScreen();
+    showScreen('end');
+    setPhaseClass();
+  }
+
+  function showEndScreen() {
+    LifeScroll.render(endResult.scroll);
+  }
+
+  function buildBiography(r) {
+    const bg = r.ranks.benguan?.name || '白身';
+    if (r.grandWin) {
+      return [
+        `${r.name}，庆历进士，历四途并进，终至${bg}。`,
+        '朝野称之「一时之选」，史册留名。',
+        '大胜之局，图鉴已录。'
+      ];
+    }
+    if (r.type === 'fail') {
+      return [
+        `${r.name}，本官止于${bg}，因${r.reason}。`,
+        '士林叹息，然名节或未尽毁。',
+        '重来一局，或可另辟宦途。'
+      ];
+    }
+    return [
+      `${r.name}，宦途六载，年齿${r.age ?? START_AGE}岁，终官${bg}。`,
+      (r.age ?? START_AGE) >= 28 ? '岁月不居，官声渐著。' : '少年得志，前程未可限量。',
+      '局后可于图鉴回看典故。'
+    ];
+  }
+
+  function showCodex() {
+    const saved = Storage.load();
+    const live = EventLog.getCodex();
+    const unlocked = new Set([...(saved.codex || []), ...live].map((c) => c.id));
+    const list = (gameData?.pickups?.length ? gameData.pickups : (window.HUANTU_GAME_DATA?.pickups || saved.codex || []));
+    const html = list.length
+      ? buildCodexGallery(list, unlocked)
+      : '<p>尚无收录。对局中拾取道具可解锁典故。</p>';
+    document.getElementById('codex-body').innerHTML = html;
+    document.getElementById('modal-codex').classList.remove('hidden');
+  }
+
+  function buildCodexGallery(list, unlocked) {
+    const cards = list.map((c, index) => {
+      const art = HuanTuCodexArt?.get?.(c) || {
+        category: Ranks.LABELS?.[c.track] || '宦途典故',
+        caption: c.detail || c.brief || '',
+        scene: c.detail || c.brief || c.name,
+        image: ''
+      };
+      const isUnlocked = unlocked.has(c.id);
+      const fx = c.effect || PickupFx.effectLabel(c);
+      const tone = c.color === 'blue' ? 'waning' : 'rising';
+      const artFigure = isUnlocked && art.image
+        ? `<figure class="codex-real-art" aria-label="${escAttr(c.name)}配图">
+            <button type="button" class="codex-preview-trigger" data-codex-image="${escAttr(art.image)}" data-codex-title="${escAttr(c.name)}" aria-label="查看${escAttr(c.name)}大图">
+              <img src="${escAttr(art.image)}" alt="${escAttr(c.name)}宋画风配图" loading="lazy">
+            </button>
+          </figure>`
+        : `<figure class="codex-art-plate codex-art-${tone}" aria-label="${escAttr(c.name)}${isUnlocked ? '配图待生成' : '未收录'}">
+            <div class="codex-art-sky"></div>
+            <div class="codex-art-hill codex-art-hill-a"></div>
+            <div class="codex-art-hill codex-art-hill-b"></div>
+            <div class="codex-art-ground"></div>
+            <span class="codex-art-orb"></span>
+            <span class="codex-art-scroll"></span>
+            <span class="codex-art-figure"></span>
+            <figcaption>${isUnlocked ? '配图待生成' : '未收录'}</figcaption>
+          </figure>`;
+      return `
+        <article class="codex-card ${isUnlocked ? 'is-unlocked' : 'is-locked'}">
+          ${artFigure}
+          <div class="codex-card-body">
+            <div class="codex-card-head">
+              <span class="codex-number">${String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <h4>${escHtml(c.name)}</h4>
+                <p>${escHtml(art.category)} · ${escHtml(fx)}</p>
+              </div>
+              <em>${isUnlocked ? '已收录' : '待收录'}</em>
+            </div>
+            <p class="codex-caption">${escHtml(art.caption)}</p>
+            <p class="codex-scene">${escHtml(art.scene)}</p>
+          </div>
+        </article>`;
+    }).join('');
+    return `
+      <section class="codex-gallery-intro">
+        <p>共 ${list.length} 则典故。已收录的典故会显示宋代中国画风真实配图；尚未收录的典故保留雅致占位，避免提前剧透画面。配套美术文档已另存，游戏内只保留图鉴内容。</p>
+      </section>
+      <section class="codex-gallery">${cards}</section>`;
+  }
+
+  function escHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function escAttr(value) {
+    return escHtml(value).replace(/'/g, '&#39;');
+  }
+
+  function openCodexPreview(src, title) {
+    const modal = document.getElementById('modal-codex-preview');
+    const img = document.getElementById('codex-preview-image');
+    const caption = document.getElementById('codex-preview-caption');
+    if (!modal || !img || !caption || !src) return;
+    img.src = src;
+    img.alt = `${title || '典故'}宋画风大图`;
+    caption.textContent = title || '典故图鉴';
+    modal.classList.remove('hidden');
+  }
+
+  function closeCodexPreview() {
+    const modal = document.getElementById('modal-codex-preview');
+    const img = document.getElementById('codex-preview-image');
+    if (!modal || !img) return;
+    modal.classList.add('hidden');
+    img.removeAttribute('src');
+    img.alt = '';
+  }
+
+  function showGameInfo() {
+    const root = document.getElementById('rank-ladder-info');
+    if (root) root.innerHTML = buildRankLadderHtml();
+    document.getElementById('modal-game-info')?.classList.remove('hidden');
+  }
+
+  function buildRankLadderHtml() {
+    if (!Ranks?.getCareerPath) return '<p class="scroll-muted">官职数据尚在加载。</p>';
+    try {
+      return Ranks.TRACKS.map((track) => {
+        const path = Ranks.getCareerPath(track);
+        const rows = path.map((r, i) => `
+          <li>
+            <span class="rank-ladder-index">${i + 1}</span>
+            <strong>${r.name}</strong>
+            <em>${r.pin || '—'}</em>
+          </li>`).join('');
+        return `
+          <article class="rank-ladder-track">
+            <h5>${Ranks.LABELS[track]}</h5>
+            <ol>${rows}</ol>
+          </article>`;
+      }).join('');
+    } catch (_) {
+      return '<p class="scroll-muted">官职数据尚在加载。</p>';
+    }
+  }
+
+  function handlePlayerImpeachHit() {
+    const res = Ranks.demoteHighest(1);
+    const track = res.track;
+    const label = track ? Ranks.LABELS[track] : '官阶';
+    if (!res.ok) {
+      if (tryUseAmnesty('弹劾')) return;
+      endGame('fail', res.reason);
+      return;
+    }
+    if (res.noop) {
+      EventLog.showQuick('弹劾中招', '无官可贬', 'demote');
+      return;
+    }
+    const st = track ? Ranks.getState().find((s) => s.track === track) : null;
+    EventLog.showQuick(
+      '弹劾中招',
+      `${label}贬一阶${st ? ' · ' + st.current.name : ''}`,
+      'demote'
+    );
+  }
+
+  function onCanvasClick(e) {
+    if (phase !== 'play' || paused || Tutorial.isActive()) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const inPlay = layout.mode === 'bottom'
+      ? y <= layout.panelY
+      : (x >= layout.playLeft && x <= layout.playRight);
+    if (inPlay && Impeachment.tryPlayerFire(player, Rivals.getList(), Npcs.getList())) {
+      return;
+    }
+
+    if (layout.mode === 'bottom' ? y > layout.panelY : (x < layout.playLeft || x > layout.playRight)) {
+      const codex = EventLog.getCodex();
+      if (codex.length) EventLog.showDetail(codex[codex.length - 1]);
+    }
+  }
+
+  function update(dt) {
+    if (phase !== 'play' || paused || Tutorial.isActive()) return;
+
+    const inBattle = Coronation.isActive();
+
+    if (inBattle) {
+      const battleResult = CoronationBattle.tick(dt, layout, player, input);
+      if (battleResult === 'win') {
+        Coronation.endChallenge();
+        endGame('emperor', '登基称帝');
+        return;
+      }
+      if (battleResult === 'lose') {
+        Coronation.endChallenge();
+        endGame('fail', '乱臣贼子');
+        return;
+      }
+      Ranks.tick(dt);
+      EventLog.tick(dt, 1, layout.playLeft || 0, layout.playAreaW);
+      return;
+    }
+
+    const progress = getProgress();
+    const speed = getSpeed();
+    player.distance += speed * dt;
+
+    Player.update(player, input.getPos(), layout, dt);
+    tickAmnesty(dt);
+    Spawner.tick(dt, progress, layout, speed, Ranks.getState());
+    Ranks.tick(dt);
+    const bannerX = layout.playLeft || 0;
+    const bannerW = layout.playAreaW;
+    EventLog.tick(dt, progress, bannerX, bannerW);
+
+    Spawner.getObstacles().forEach(handleObstacle);
+    Spawner.getSpecials().forEach(handleSpecial);
+    Spawner.getPickups().forEach(handlePickup);
+    Spawner.getCoins().forEach(handleCoin);
+    Spawner.getMerits().forEach(handleMerit);
+    Spawner.getAmnesties().forEach(handleAmnesty);
+    handleCoronationRobe();
+
+    const spawnerState = {
+      pickups: Spawner.getPickups(),
+      coins: Spawner.getCoins(),
+      merits: Spawner.getMerits(),
+      obstacles: Spawner.getObstacles()
+    };
+    const aiPeers = [...Npcs.getList(), ...Rivals.getList()];
+    Npcs.tick(dt, layout, player, speed, progress, spawnerState, aiPeers);
+    Rivals.tick(dt, layout, spawnerState, aiPeers);
+
+    const badPickups = Spawner.getPickups().filter((p) => p.color === 'blue');
+    Impeachment.tick(
+      dt, layout, player,
+      Rivals.getList(), Npcs.getList(), badPickups,
+      handlePlayerImpeachHit
+    );
+
+    tryOfferCoronation();
+    ensureCoronationRobe(dt);
+
+    if (!Coronation.isActive() && !isAwaitingCoronationRobe()) {
+      timeLeft -= dt;
+      if (timeLeft <= 0) {
+        timeLeft = 0;
+        endGame('time', '任期已满');
+        return;
+      }
+    }
+
+    if (checkAgeMortality(dt)) return;
+    checkVitals();
+  }
+
+  function render() {
+    const w = cssW;
+    const h = cssH;
+    Renderer.drawPaperTexture(ctx, w, h);
+
+    if (phase === 'menu') {
+      return;
+    }
+    if (!player) return;
+
+    Renderer.setLayout(layout);
+    Renderer.drawPlayChrome(ctx, layout, h);
+    Renderer.drawHud(ctx, layout.playAreaW, layout.hudH, {
+      playerName,
+      age: getPlayerAge(),
+      coinBank: player.coinBank || 0,
+      coinNeed: Ranks.getCoinThreshold(),
+      meritBank: player.meritBank || 0,
+      meritNeed: Ranks.getMeritThreshold(),
+      safety: player.safety,
+      integrity: player.integrity,
+      amnestyLeft: player.amnestyLeft || 0,
+      hellMode: Difficulty.isHell(),
+      impeachReady: Impeachment.isPlayerReady(),
+      impeachLeft: Impeachment.getPlayerCdLeft()
+    }, layout);
+    Renderer.drawLaneHeaders(ctx, layout);
+    Renderer.drawLanes(ctx, layout, layout.playHeight);
+
+    if (Coronation.isActive()) {
+      CoronationBattle.getAllies().forEach((npc) => Renderer.drawNpc(ctx, npc, 'ally'));
+      CoronationBattle.getEnemies().forEach((npc) => {
+        Renderer.drawNpc(ctx, npc, npc.isBoss ? 'boss' : 'enemy');
+      });
+      CoronationBattle.getDrops().forEach((d) => Renderer.drawLightDrop(ctx, d));
+      CoronationBattle.getBullets().forEach((b) => Renderer.drawBattleBullet(ctx, b));
+    } else {
+      Spawner.getObstacles().forEach((o) => Renderer.drawObstacle(ctx, o));
+      Spawner.getSpecials().forEach((s) => Renderer.drawSpecial(ctx, s));
+      Npcs.getList().forEach((npc) => Renderer.drawNpc(ctx, npc));
+      Rivals.getList().forEach((r) => Renderer.drawNpc(ctx, r));
+      Spawner.getAmnesties().forEach((a) => Renderer.drawAmnesty(ctx, a));
+      Spawner.getCoins().forEach((c) => Renderer.drawCoin(ctx, c));
+      Spawner.getMerits().forEach((m) => Renderer.drawMerit(ctx, m));
+      Spawner.getPickups().forEach((p) => Renderer.drawPickup(ctx, p));
+      const robe = Spawner.getCoronationRobe();
+      if (robe) Renderer.drawCoronationRobe(ctx, robe);
+      Impeachment.getProjectiles().forEach((b) => Renderer.drawImpeachBall(ctx, b));
+    }
+
+    Renderer.drawPlayer(ctx, player, Coronation.isActive() ? CoronationBattle.getHud() : null);
+
+    if (Coronation.isActive()) {
+      Renderer.drawBattleEffects(ctx, CoronationBattle.getEffects());
+      Renderer.drawCoronationBanner(ctx, layout, CoronationBattle.getHud());
+    }
+
+    const tenureMeta = {
+      tenureLeft: formatTenureLeft(),
+      tenureLabel: tenureHudLabel(),
+      uiScale: layout.uiScale
+    };
+    if (layout.mode === 'bottom') {
+      Renderer.drawRankPanelBottom(ctx, layout, Ranks.getState(), tenureMeta);
+    } else {
+      Renderer.drawRankPanel(ctx, layout.rankPanelX ?? layout.panelX, layout.rankPanelW ?? layout.panelW, h, Ranks.getState(), {
+        age: getPlayerAge(),
+        ageProgress: getAgeProgress(),
+        tenureLeft: tenureMeta.tenureLeft,
+        tenureLabel: tenureMeta.tenureLabel,
+        uiScale: layout.uiScale,
+        startAge: START_AGE
+      });
+    }
+    Renderer.drawAmbientBanner(ctx, layout, EventLog.getBanner());
+    Renderer.drawToast(ctx, layout, h, EventLog.getToast(), EventLog.getToastAlpha());
+
+    const detail = EventLog.getDetail();
+    if (detail) {
+      Renderer.drawOverlay(ctx, w, h,
+        [detail.name, detail.brief, detail.detail || ''],
+        '典故', '点击继续');
+    }
+  }
+
+  function loop(ts) {
+    const dt = Math.min(0.05, (ts - lastTs) / 1000 || 0);
+    lastTs = ts;
+    try {
+      update(dt);
+      render();
+    } catch (err) {
+      console.error('宦途疾行运行错误', err);
+      showLoadError('运行出错：' + (err.message || '请刷新重试'));
+      phase = 'menu';
+      document.getElementById('screen-menu')?.classList.remove('hidden');
+      setPhaseClass();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  return { init, tryStart };
+})();
+
+document.addEventListener('DOMContentLoaded', () => {
+  Game.init();
+  document.getElementById('modal-codex')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-codex' || e.target.classList.contains('modal-close')) {
+      document.getElementById('modal-codex').classList.add('hidden');
+    }
+  });
+  document.getElementById('modal-game-info')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-game-info' || e.target.classList.contains('modal-close')) {
+      document.getElementById('modal-game-info').classList.add('hidden');
+    }
+  });
+  document.getElementById('game')?.addEventListener('click', () => EventLog.closeDetail());
+});
+
+
+
+
+
+
+
+

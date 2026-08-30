@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#efe4cc"/>
+  <rect x="7" y="7" width="50" height="50" rx="7" fill="#8b1c1c"/>
+  <rect x="12" y="12" width="40" height="40" rx="4" fill="none" stroke="#d9b85f" stroke-width="2"/>
+  <text x="32" y="43" text-anchor="middle" font-size="34" font-family="KaiTi, STKaiti, serif" font-weight="700" fill="#f8f2e4">宦</text>
+</svg>

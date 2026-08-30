@@ -1,0 +1,1280 @@
+﻿/* 宦途疾行 · 黄袍加身终局 — 飞机大战式逼宫战 */
+const CoronationBattle = (() => {
+  const OFFICIAL_TOTAL = 200;
+  const MINION_TOTAL = 160;
+  const TOTAL = OFFICIAL_TOTAL + MINION_TOTAL;
+  const ALLY_TARGET = 140;
+  const HELL_ALLY_MULT = 0.8;
+  const ALLY_PACE = 0.84;
+  const ALLY_WAVE_SIZES = [18, 18, 18, 17, 17, 18, 17, 17];
+  const ALLY_GRUNT_MAX_HITS = 1;
+  const ALLY_OFFICIAL_MAX_HITS = 2;
+  const BASE_SPAWN_INTERVAL = 0.66;
+  const BASE_SPAWN_BATCH = 3;
+  const WAVE_OFFICIAL_SIZES = [25, 25, 25, 25, 25, 25, 25, 25];
+  const WAVE_MINION_SIZES = [20, 20, 20, 20, 20, 20, 20, 20];
+  const WAVE_SIZES = WAVE_OFFICIAL_SIZES.map((n, i) => n + WAVE_MINION_SIZES[i]);
+  /** 八轮对战：波次越高略加速（幅度收敛） */
+  const WAVE_SPAWN_MULT = [1, 1.14, 1.26, 1.36, 1.44, 1.50, 1.55, 1.58];
+  const WAVE_FIRE_MULT = [1, 1.10, 1.20, 1.28, 1.34, 1.38, 1.42, 1.45];
+  const WAVE_BREAKS = (() => {
+    const out = [];
+    let acc = 0;
+    for (let i = 0; i < WAVE_SIZES.length - 1; i++) {
+      acc += WAVE_SIZES[i];
+      out.push(acc);
+    }
+    return out;
+  })();
+  const WAVE_PAUSE = 2.0;
+  const BALL_R = 12;
+  const PLAYER_FIRE_CD = 0.19;
+  const PLAYER_BULLET_SPEED = 520;
+  const ALLY_BULLET_SPEED = 360;
+  const ENEMY_BULLET_SPEED = 225;
+  const BOSS_BULLET_SPEED = 225;
+  const PLAYER_MOVE_SPEED = 340;
+  const TOUCH_LERP = 22;
+  const TOUCH_DEADZONE = 5;
+  const ENEMY_DRIFT = 84;
+  const MINION_DRIFT = 100;
+  const ALLY_DRIFT = 28;
+  const PLAYER_MAX_HP = 6;
+  const PLAYER_MAX_HITS = PLAYER_MAX_HP;
+  const UNIT_MAX_HITS = 2;
+  const BOSS_MAX_HITS = 80;
+  const HELL_BOSS_MAX_HITS = 160;
+  const LIGHT_DROP_CHANCE = 0.20;
+  const HELL_BOSS_LIGHT_BONUS = 0.03;
+  const HELL_BOSS_LIGHT_FINAL_BONUS = 0.02;
+  const HELL_ALLY_LIGHT_CHANCE = 0.04;
+  const HELL_BOSS_LIGHT_EXTRA = 0.0;
+  const FLAME_DROP_CHANCE = 0.055;
+  const FLAME_POWER_DURATION = 12;
+  const FLAME_DAMAGE_MULT = 1.5;
+  const LIGHT_INVINCIBLE = 10;
+  const FINAL_WAVE_SKY_LIGHT_INTERVAL = 7;
+  const FINAL_WAVE_SKY_LIGHT_CHANCE = 0.4;
+  const HIT_IFRAME = 0.55;
+  const PRACTICE_HIT_INVINCIBLE = 2;
+  const ENEMY_FIRE_RATE = 1.0;
+  const ENEMY_FIRE_MIN = 1.4 / ENEMY_FIRE_RATE;
+  const ENEMY_FIRE_MAX = 2.6 / ENEMY_FIRE_RATE;
+  const BOSS_FIRE_MIN = 0.48 / ENEMY_FIRE_RATE;
+  const BOSS_FIRE_MAX = 0.72 / ENEMY_FIRE_RATE;
+  const BOSS_MINION_INTERVAL = 1.85 / ENEMY_FIRE_RATE;
+  const BOSS_MAX_MINIONS = 22;
+  const HELL_BOSS_MINION_MULT = 0.9;
+  const ALLY_OFFICIAL_RATE = 0.24;
+  const BOSS_BRIDGE_SEC = 2.2;
+  const ALLY_SURVIVE_RATE = 0.5;
+  const SLAY_WARN_SEC = 0.25;
+  const SLAY_ATTACK_SEC = 0.22;
+  const SLAY_DAMAGE = 2;
+  const THUNDER_WARN_SEC = 0.4;
+  const THUNDER_STRIKE_SEC = 0.22;
+  const THUNDER_WIDTH = 36.96;
+  const THUNDER_DAMAGE = 3;
+  function isHellBattle() {
+    return typeof Difficulty !== 'undefined' && Difficulty.isHell();
+  }
+
+  function bossMaxHits() {
+    return isHellBattle() ? HELL_BOSS_MAX_HITS : BOSS_MAX_HITS;
+  }
+
+  function allyTarget() {
+    return isHellBattle() ? Math.floor(ALLY_TARGET * HELL_ALLY_MULT) : ALLY_TARGET;
+  }
+
+  function minionMaxHits() {
+    return isHellBattle() ? UNIT_MAX_HITS * 1.2 : UNIT_MAX_HITS;
+  }
+
+  function bossFireMin() {
+    return isHellBattle() ? 0.42 : BOSS_FIRE_MIN;
+  }
+
+  function bossFireMax() {
+    return isHellBattle() ? 0.64 : BOSS_FIRE_MAX;
+  }
+
+  function bossMinionInterval() {
+    return isHellBattle() ? 1.62 / HELL_BOSS_MINION_MULT : BOSS_MINION_INTERVAL;
+  }
+
+  function bossMaxMinions() {
+    const currentHellCap = BOSS_MAX_MINIONS + 2;
+    return isHellBattle() ? Math.round(currentHellCap * HELL_BOSS_MINION_MULT) : BOSS_MAX_MINIONS;
+  }
+
+  function lightDropChance(side, wasBoss) {
+    if (wasBoss) return 0;
+    let chance = side === 'player' ? LIGHT_DROP_CHANCE : 0;
+    if (!isHellBattle() || phase !== 'boss') return chance;
+    const boss = getBoss();
+    if (!boss || !boss.maxHits) return chance;
+    const pressure = boss.hits / boss.maxHits;
+    if (side === 'player') chance += HELL_BOSS_LIGHT_EXTRA;
+    if (pressure >= 0.58) {
+      chance += side === 'player' ? HELL_BOSS_LIGHT_BONUS : HELL_ALLY_LIGHT_CHANCE;
+    }
+    if (pressure >= 0.82) {
+      chance += side === 'player' ? HELL_BOSS_LIGHT_FINAL_BONUS : HELL_ALLY_LIGHT_CHANCE;
+    }
+    return chance;
+  }
+
+  function flameDropChance(side, wasBoss) {
+    if (!isHellBattle() || phase !== 'boss' || wasBoss || side !== 'player') return 0;
+    const boss = getBoss();
+    if (!boss) return 0;
+    const pressure = boss.maxHits ? boss.hits / boss.maxHits : 0;
+    return FLAME_DROP_CHANCE + (pressure >= 0.6 ? 0.02 : 0);
+  }
+
+  function bossBulletSpeed() {
+    return BOSS_BULLET_SPEED + (isHellBattle() ? 18 : 0);
+  }
+
+  function bossSpread() {
+    return isHellBattle() ? [-60, -36, -12, 12, 36, 60] : [-52, -24, 0, 24, 52];
+  }
+
+  function rollEnemyFireCd() {
+    const w = combatWaveIndex();
+    const min = (1.48 / ENEMY_FIRE_RATE) / WAVE_FIRE_MULT[w];
+    const max = (2.75 / ENEMY_FIRE_RATE) / WAVE_FIRE_MULT[w];
+    return min + Math.random() * (max - min);
+  }
+
+  function combatWaveIndex() {
+    if (phase !== 'waves') return WAVE_SIZES.length - 1;
+    return Math.min(waveIdx, WAVE_SIZES.length - 1);
+  }
+
+  function spawnIntervalForWave() {
+    return BASE_SPAWN_INTERVAL / WAVE_SPAWN_MULT[combatWaveIndex()];
+  }
+
+  function spawnBatchForWave() {
+    return Math.min(8, BASE_SPAWN_BATCH + combatWaveIndex());
+  }
+
+  const HIGH_RANKS = [
+    '宰相', '枢密使', '参政知事', '尚书令', '侍中', '同平章事',
+    '太保', '太傅', '太尉', '节度使', '宣徽使', '枢相',
+    '知枢密院', '中书令', '尚书右丞', '翰林承旨', '副枢密使', '参知政事'
+  ];
+  const FOE_SURNAMES = ['韩', '富', '吕', '晏', '欧阳', '范', '包', '曾', '蔡', '庞', '文', '种'];
+  const FOE_GIVEN1 = ['彦', '子', '夷', '元', '公', '君', '仲', '文', '正', '德', '师'];
+  const FOE_GIVEN2 = ['博', '坚', '简', '殊', '修', '弼', '拯', '巩', '京', '卞', '通'];
+  const ALLY_RANKS = [
+    '知州', '通判', '推官', '知县', '签书', '节度推官',
+    '殿中丞', '监察御史', '员外郎', '郎中', '侍郎', '知府',
+    '转运使', '提点刑狱', '翰林学士', '待制', '龙图阁直学士', '参知政事'
+  ];
+  const ALLY_SURNAMES = ['李', '王', '张', '赵', '刘', '陈', '杨', '黄', '周', '吴', '徐', '孙'];
+  const ALLY_GIVEN1 = ['仲', '彦', '子', '君', '元', '正', '师', '希', '永', '升', '执', '文'];
+  const ALLY_GIVEN2 = ['文', '固', '国', '中', '范', '谟', '修', '厚', '言', '之', '道', '甫'];
+  const ALLY_ROBES = ['#3a5a6a', '#4a6a7a', '#3a5868', '#456878', '#3d6270'];
+
+  let active = false;
+  let phase = 'waves';
+  let allies = [];
+  let enemies = [];
+  let bullets = [];
+  let drops = [];
+  let spawnCount = 0;
+  let officialSpawned = 0;
+  let minionSpawned = 0;
+  let allySpawned = 0;
+  let allySpawnDebt = 0;
+  let spawnAcc = 0;
+  let waveIdx = 0;
+  let wavePause = 0;
+  let bossBridgeT = 0;
+  let playerHits = 0;
+  let playerFireCd = 0;
+  let hitFlash = 0;
+  let flamePowerT = 0;
+  let lightShieldT = 0;
+  let finalWaveSkyLightCd = FINAL_WAVE_SKY_LIGHT_INTERVAL;
+  let finalWaveFlameDropped = false;
+  let skillEffects = [];
+  let damageEvents = [];
+  let damageSeq = 0;
+  let hellPracticeAssist = false;
+
+  function reset() {
+    active = false;
+    phase = 'waves';
+    allies = [];
+    enemies = [];
+    bullets = [];
+    drops = [];
+    spawnCount = 0;
+    officialSpawned = 0;
+    minionSpawned = 0;
+    allySpawned = 0;
+    allySpawnDebt = 0;
+    spawnAcc = 0;
+    waveIdx = 0;
+    wavePause = 0;
+    bossBridgeT = 0;
+    playerHits = 0;
+    playerFireCd = 0;
+    hitFlash = 0;
+    flamePowerT = 0;
+    lightShieldT = 0;
+    finalWaveSkyLightCd = FINAL_WAVE_SKY_LIGHT_INTERVAL;
+    finalWaveFlameDropped = false;
+    skillEffects = [];
+    damageEvents = [];
+    damageSeq = 0;
+    hellPracticeAssist = false;
+  }
+
+  function randomFoeIdentity() {
+    const rankTitle = HIGH_RANKS[Math.floor(Math.random() * HIGH_RANKS.length)];
+    const sn = FOE_SURNAMES[Math.floor(Math.random() * FOE_SURNAMES.length)];
+    const g1 = FOE_GIVEN1[Math.floor(Math.random() * FOE_GIVEN1.length)];
+    const g2 = FOE_GIVEN2[Math.floor(Math.random() * FOE_GIVEN2.length)];
+    const name = sn + g1 + g2;
+    return { rankTitle, name };
+  }
+
+  function randomAllyName() {
+    const sn = ALLY_SURNAMES[Math.floor(Math.random() * ALLY_SURNAMES.length)];
+    const g1 = ALLY_GIVEN1[Math.floor(Math.random() * ALLY_GIVEN1.length)];
+    const g2 = ALLY_GIVEN2[Math.floor(Math.random() * ALLY_GIVEN2.length)];
+    return sn + g1 + g2;
+  }
+
+  function randomAllyIdentity() {
+    const rankTitle = ALLY_RANKS[Math.floor(Math.random() * ALLY_RANKS.length)];
+    return { rankTitle, name: randomAllyName() };
+  }
+
+  function spawnAllyReinforcement(layout) {
+    if (allySpawned >= allyTarget()) return;
+    const index = allySpawned;
+    const official = Math.random() < ALLY_OFFICIAL_RATE;
+    const id = official ? randomAllyIdentity() : null;
+    const compactSize = Lanes.fitSize(layout, 15, 19);
+    const size = official ? Lanes.fitSize(layout, 20, 26) : compactSize;
+    const margin = size.w / 2 + 4;
+    const span = Math.max(20, layout.trackWidth - margin * 2);
+    const x = layout.trackLeft + margin + Math.random() * span;
+    const y = layout.playTop + layout.playHeight - 14 - Math.random() * 28;
+    allies.push({
+      id: 'reinforce_' + index,
+      name: official ? id.name : '',
+      rankTitle: official ? id.rankTitle : '',
+      named: official,
+      reinforce: !official,
+      x,
+      y,
+      w: size.w,
+      h: size.h,
+      robe: ALLY_ROBES[index % ALLY_ROBES.length],
+      pulse: (index % 7) * 0.9,
+      state: 'active',
+      side: 'ally',
+      hits: 0,
+      maxHits: official ? ALLY_OFFICIAL_MAX_HITS : ALLY_GRUNT_MAX_HITS,
+      fireCd: 0.7 + Math.random() * 0.8,
+      vx: 0,
+      vy: -ALLY_DRIFT * 0.5,
+      battle: true,
+      entering: true
+    });
+    allySpawned += 1;
+  }
+
+  function allyQuotaForWave(wave) {
+    let sum = 0;
+    for (let i = 0; i <= wave && i < ALLY_WAVE_SIZES.length; i++) sum += ALLY_WAVE_SIZES[i];
+    return sum;
+  }
+
+  function syncAllyReinforcements(layout) {
+    const target = allyTarget();
+    const progress = spawnCountTotal() / TOTAL;
+    const byProgress = Math.floor(progress * target);
+    const waveScale = target / ALLY_TARGET;
+    const byWave = Math.floor(allyQuotaForWave(waveIdx) * ALLY_PACE * waveScale);
+    const want = Math.min(target, Math.max(byProgress, byWave));
+    while (allySpawned < want) spawnAllyReinforcement(layout);
+  }
+
+  function accrueAllyDebt(enemyCount) {
+    allySpawnDebt += enemyCount * (allyTarget() / TOTAL);
+  }
+
+  function adoptUnit(src, side) {
+    if (!src || src.state === 'knockfly' || (src.fade ?? 1) < 0.15) return null;
+    const allyId = side === 'ally' ? randomAllyIdentity() : null;
+    const named = side === 'ally' && Math.random() < 0.5;
+    return {
+      id: src.id || ('ally_' + Math.random()),
+      name: src.name || (allyId ? allyId.name : ''),
+      rankTitle: named && allyId ? allyId.rankTitle : '',
+      named: named && !!allyId,
+      reinforce: false,
+      x: src.x,
+      y: src.y,
+      w: src.w,
+      h: src.h,
+      robe: side === 'ally' ? (src.robe || '#3a5a6a') : '#6a2828',
+      pulse: src.pulse || 0,
+      state: 'active',
+      side,
+      hits: 0,
+      maxHits: named && !!allyId ? ALLY_OFFICIAL_MAX_HITS : ALLY_GRUNT_MAX_HITS,
+      fireCd: 0.9 + Math.random() * 1.0,
+      vx: 0,
+      vy: ALLY_DRIFT,
+      battle: true
+    };
+  }
+
+  function spawnCountTotal() {
+    return officialSpawned + minionSpawned;
+  }
+
+  function pickNextSpawnKind() {
+    const oLeft = OFFICIAL_TOTAL - officialSpawned;
+    const mLeft = MINION_TOTAL - minionSpawned;
+    if (oLeft <= 0) return 'grunt';
+    if (mLeft <= 0) return 'official';
+    const progress = spawnCountTotal() / TOTAL;
+    const wantMinion = Math.floor(MINION_TOTAL * progress) + 3;
+    const wantOfficial = Math.floor(OFFICIAL_TOTAL * progress);
+    if (minionSpawned < wantMinion) return 'grunt';
+    if (officialSpawned < wantOfficial) return 'official';
+    return minionSpawned / MINION_TOTAL < officialSpawned / OFFICIAL_TOTAL ? 'grunt' : 'official';
+  }
+
+  function spawnPos(layout, size, yBias) {
+    const margin = size.w / 2 + 6;
+    const span = Math.max(20, layout.trackWidth - margin * 2);
+    return {
+      x: layout.trackLeft + margin + Math.random() * span,
+      y: layout.playTop + (yBias ?? 18)
+    };
+  }
+
+  function makeMinion(layout, xHint) {
+    const size = Lanes.fitSize(layout, 22, 28);
+    const margin = size.w / 2 + 6;
+    const span = Math.max(20, layout.trackWidth - margin * 2);
+    const x = xHint != null
+      ? Math.max(layout.trackLeft + margin, Math.min(layout.trackLeft + layout.trackWidth - margin, xHint + (Math.random() - 0.5) * 50))
+      : layout.trackLeft + margin + Math.random() * span;
+    return {
+      id: 'minion_' + Date.now() + Math.random(),
+      rankTitle: '',
+      name: '兵',
+      label: '兵',
+      x,
+      y: layout.playTop + 12,
+      w: size.w,
+      h: size.h,
+      robe: '#8c3535',
+      pulse: Math.random() * Math.PI * 2,
+      state: 'active',
+      side: 'enemy',
+      isMinion: true,
+      hits: 0,
+      maxHits: minionMaxHits(),
+      fireCd: rollEnemyFireCd() * 0.45,
+      vx: (Math.random() - 0.5) * 40,
+      vy: MINION_DRIFT,
+      battle: true
+    };
+  }
+
+  function spawnWaveOfficial(layout) {
+    const size = Lanes.fitSize(layout, 26, 32);
+    const id = randomFoeIdentity();
+    const pos = spawnPos(layout, size, 18);
+    enemies.push({
+      id: 'foe_' + officialSpawned,
+      rankTitle: id.rankTitle,
+      name: id.name,
+      named: true,
+      x: pos.x,
+      y: pos.y,
+      w: size.w,
+      h: size.h,
+      robe: '#5a2020',
+      pulse: Math.random() * Math.PI * 2,
+      state: 'active',
+      side: 'enemy',
+      isMinion: false,
+      hits: 0,
+      maxHits: UNIT_MAX_HITS,
+      fireCd: rollEnemyFireCd() * 0.55,
+      vx: (Math.random() - 0.5) * 36,
+      vy: ENEMY_DRIFT,
+      battle: true
+    });
+    officialSpawned += 1;
+    spawnCount = spawnCountTotal();
+  }
+
+  function spawnWaveGrunt(layout) {
+    const size = Lanes.fitSize(layout, 22, 28);
+    const pos = spawnPos(layout, size, 8 + Math.random() * 14);
+    enemies.push({
+      id: 'grunt_' + minionSpawned,
+      rankTitle: '',
+      name: '兵',
+      label: '兵',
+      x: pos.x,
+      y: pos.y,
+      w: size.w,
+      h: size.h,
+      robe: '#8c3535',
+      pulse: Math.random() * Math.PI * 2,
+      state: 'active',
+      side: 'enemy',
+      isMinion: true,
+      hits: 0,
+      maxHits: minionMaxHits(),
+      fireCd: rollEnemyFireCd() * 0.72,
+      vx: (Math.random() - 0.5) * 48,
+      vy: MINION_DRIFT,
+      battle: true
+    });
+    minionSpawned += 1;
+    spawnCount = spawnCountTotal();
+  }
+
+  function spawnBoss(layout) {
+    if (getBoss()) return;
+    const size = Lanes.fitSize(layout, 46, 54);
+    const cx = layout.trackLeft + layout.trackWidth / 2;
+    enemies.push({
+      id: 'emperor_boss',
+      rankTitle: '伪帝',
+      name: '赵祯',
+      isBoss: true,
+      x: cx,
+      y: layout.playTop + 52,
+      w: size.w,
+      h: size.h,
+      robe: '#5a0a0a',
+      pulse: 0,
+      state: 'active',
+      side: 'enemy',
+      hits: 0,
+      maxHits: bossMaxHits(),
+      fireCd: 0.8,
+      minionCd: 0.6,
+      skillCd: isHellBattle() ? 2.4 : Infinity,
+      skill: null,
+      swayT: 0,
+      battle: true
+    });
+  }
+
+  function trimAlliesForBossBridge() {
+    if (allies.length <= 6) return;
+    const survive = Math.max(6, Math.floor(allies.length * ALLY_SURVIVE_RATE));
+    for (let i = allies.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = allies[i];
+      allies[i] = allies[j];
+      allies[j] = tmp;
+    }
+    allies.length = survive;
+  }
+
+  function beginBossPhase(layout) {
+    if (phase !== 'waves') return;
+    phase = 'boss_bridge';
+    bossBridgeT = BOSS_BRIDGE_SEC;
+    bullets = bullets.filter((b) => b.side !== 'enemy');
+    trimAlliesForBossBridge();
+    EventLog.showQuick('八阵已破', '殿门洞开！伪帝御前，逼宫正酣……', 'demote');
+  }
+
+  function finalizeBossPhase(layout) {
+    phase = 'boss';
+    spawnBoss(layout);
+    EventLog.showQuick('逼宫决战', '伪帝赵祯 · 击溃方可登基！', 'demote');
+  }
+
+  function countMinions() {
+    return enemies.filter((e) => e.isMinion).length;
+  }
+
+  function getBoss() {
+    return enemies.find((e) => e.isBoss) || null;
+  }
+
+  function start(layout, npcList, rivalList, options = {}) {
+    reset();
+    active = true;
+    hellPracticeAssist = !!options.hellPracticeAssist;
+    npcList.forEach((n) => {
+      const u = adoptUnit(n, 'ally');
+      if (u) allies.push(u);
+    });
+    rivalList.forEach((r) => {
+      const u = adoptUnit(r, 'ally');
+      if (u) allies.push(u);
+    });
+    if (isHellBattle() && allies.length > 1) {
+      for (let i = allies.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = allies[i];
+        allies[i] = allies[j];
+        allies[j] = tmp;
+      }
+      allies.length = Math.max(1, Math.floor(allies.length * HELL_ALLY_MULT));
+    }
+    spawnAcc = 0.55;
+    EventLog.showQuick('八轮对战', '敌我分批对垒，敌略占上风！破阵后逼宫', 'demote');
+  }
+
+  function skipToBossPhase(layout) {
+    phase = 'boss_bridge';
+    bossBridgeT = 0.05;
+    officialSpawned = OFFICIAL_TOTAL;
+    minionSpawned = MINION_TOTAL;
+    allySpawned = allyTarget();
+    spawnCount = TOTAL;
+    waveIdx = WAVE_SIZES.length - 1;
+    enemies = [];
+    bullets = bullets.filter((b) => b.side !== 'enemy');
+  }
+
+  function isActive() {
+    return active;
+  }
+
+  function spawnBall(x, y, tx, ty, speed, side, opts = {}) {
+    const dx = tx - x;
+    const dy = ty - y;
+    const d = Math.hypot(dx, dy) || 1;
+    bullets.push({
+      x,
+      y,
+      vx: (dx / d) * speed,
+      vy: (dy / d) * speed,
+      r: BALL_R,
+      side,
+      damage: opts.damage || 1,
+      flame: !!opts.flame,
+      source: opts.source || '',
+      sourceDetail: opts.sourceDetail || '',
+      pulse: Math.random() * Math.PI * 2
+    });
+  }
+
+  function tryPlayerFire(player) {
+    if (!active || playerFireCd > 0) return false;
+    const target = nearestEnemy(player);
+    if (!target) return false;
+    const flame = flamePowerT > 0;
+    spawnBall(player.x, player.y - 6, target.x, target.y, PLAYER_BULLET_SPEED, 'player', {
+      flame,
+      damage: flame ? FLAME_DAMAGE_MULT : 1
+    });
+    playerFireCd = PLAYER_FIRE_CD;
+    return true;
+  }
+
+  function unitBox(u) {
+    const pad = u.isBoss ? 4 : 2;
+    return {
+      x: u.x - u.w / 2 + pad,
+      y: u.y - u.h / 2 + pad,
+      w: u.w - pad * 2,
+      h: u.h - pad * 2
+    };
+  }
+
+  function clampUnit(u, layout) {
+    const halfW = u.w / 2;
+    const halfH = u.h / 2;
+    u.x = Math.max(
+      layout.trackLeft + halfW,
+      Math.min(layout.trackLeft + layout.trackWidth - halfW, u.x)
+    );
+    u.y = Math.max(
+      layout.playTop + halfH,
+      Math.min(layout.playTop + layout.playHeight - halfH, u.y)
+    );
+  }
+
+  function nearestEnemy(from) {
+    const boss = getBoss();
+    if (boss) return boss;
+    let best = null;
+    let bestD = Infinity;
+    enemies.forEach((e) => {
+      const d = Math.hypot(e.x - from.x, e.y - from.y);
+      if (d < bestD) {
+        bestD = d;
+        best = e;
+      }
+    });
+    return best;
+  }
+
+  function trySpawnWaves(dt, layout) {
+    if (phase !== 'waves' || spawnCountTotal() >= TOTAL) return;
+    if (wavePause > 0) {
+      wavePause -= dt;
+      return;
+    }
+    spawnAcc += dt;
+    const interval = spawnIntervalForWave();
+    while (spawnAcc >= interval && spawnCountTotal() < TOTAL) {
+      spawnAcc -= interval;
+      const batch = Math.min(spawnBatchForWave(), TOTAL - spawnCountTotal());
+      let spawnedThisTick = 0;
+      for (let i = 0; i < batch; i++) {
+        const kind = pickNextSpawnKind();
+        if (kind === 'official') spawnWaveOfficial(layout);
+        else spawnWaveGrunt(layout);
+        spawnedThisTick += 1;
+        accrueAllyDebt(1);
+        while (allySpawnDebt >= 1 && allySpawned < allyTarget()) {
+          allySpawnDebt -= 1;
+          spawnAllyReinforcement(layout);
+        }
+        if (WAVE_BREAKS.includes(spawnCountTotal())) {
+          waveIdx += 1;
+          wavePause = WAVE_PAUSE;
+          syncAllyReinforcements(layout);
+          if (waveIdx < WAVE_SIZES.length) {
+            EventLog.showQuick(
+              '对阵波次',
+              `第 ${waveIdx + 1} 波 · 敌援同步增兵……`,
+              'demote'
+            );
+          }
+          break;
+        }
+      }
+      if (spawnedThisTick > 0) syncAllyReinforcements(layout);
+      if (wavePause > 0) break;
+    }
+  }
+
+  function updateEnemyMotion(e, player, layout, dt) {
+    const density = Math.min(1, spawnCountTotal() / TOTAL);
+    const toPx = player.x - e.x;
+    const toPy = player.y - e.y;
+    const steerCap = 70 + density * 80;
+    const steerX = Math.sign(toPx) * Math.min(Math.abs(toPx), steerCap);
+    e.vx = e.vx * 0.84 + steerX * dt * (2 + density * 2.8);
+
+    let avgX = 0;
+    let avgY = 0;
+    let near = 0;
+    enemies.forEach((o) => {
+      if (o === e || o.isBoss) return;
+      const d = Math.hypot(o.x - e.x, o.y - e.y);
+      if (d > 72 || d < 4) return;
+      avgX += o.x;
+      avgY += o.y;
+      near += 1;
+    });
+    if (near > 0) {
+      avgX /= near;
+      avgY /= near;
+      e.vx += (avgX - e.x) * (0.18 + density * 0.28) * dt;
+      e.y += (avgY - e.y) * (0.08 + density * 0.14) * dt;
+    }
+
+    const rush = ENEMY_DRIFT * (0.95 + density * 0.75);
+    const dive = toPy > 0 ? Math.min(toPy * 0.12, 90) : 0;
+    e.vy = rush + dive * 0.35;
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    clampUnit(e, layout);
+  }
+
+  function updateMinionMotion(e, player, layout, dt) {
+    const toPx = player.x - e.x;
+    const toPy = player.y - e.y;
+    e.vx = e.vx * 0.82 + Math.sign(toPx) * Math.min(Math.abs(toPx), 80) * dt * 2.4;
+    const rush = MINION_DRIFT + Math.min(Math.max(0, toPy) * 0.15, 100);
+    e.vy = rush;
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    clampUnit(e, layout);
+  }
+
+  function recordDamage(amount, beforeHits, afterHits, meta = {}) {
+    const actual = Math.max(0, afterHits - beforeHits);
+    if (actual <= 0) return;
+    damageSeq += 1;
+    damageEvents.push({
+      seq: damageSeq,
+      source: meta.source || 'unknown',
+      sourceDetail: meta.sourceDetail || '',
+      amount,
+      actualDamage: actual,
+      hpBefore: Math.max(0, PLAYER_MAX_HP - beforeHits),
+      hpAfter: Math.max(0, PLAYER_MAX_HP - afterHits),
+      hitsBefore: beforeHits,
+      hitsAfter: afterHits,
+      phase,
+      wave: phase === 'boss' ? 0 : Math.min(waveIdx + 1, WAVE_SIZES.length),
+      waveTotal: WAVE_SIZES.length,
+      bossActive: !!getBoss(),
+      bossHits: getBoss()?.hits || 0,
+      bossMaxHits: bossMaxHits(),
+      lightShieldActive: lightShieldT > 0,
+      flameActive: flamePowerT > 0,
+      nonFatal: !!meta.nonFatal
+    });
+  }
+
+  function applyPlayerDamage(amount, nonFatal = false, meta = {}) {
+    if (amount <= 0) return;
+    const cap = nonFatal ? PLAYER_MAX_HP - 1 : PLAYER_MAX_HP;
+    const beforeHits = playerHits;
+    playerHits = Math.min(cap, playerHits + amount);
+    recordDamage(amount, beforeHits, playerHits, { ...meta, nonFatal });
+    hitFlash = hitInvincibleTime();
+  }
+
+  function hitInvincibleTime() {
+    return hellPracticeAssist && isHellBattle() ? PRACTICE_HIT_INVINCIBLE : HIT_IFRAME;
+  }
+
+  function randomSkillCd() {
+    return 4.8 + Math.random() * 2.4;
+  }
+
+  function clampedBossPos(layout, x, y, boss) {
+    const halfW = boss.w / 2;
+    const halfH = boss.h / 2;
+    return {
+      x: Math.max(layout.trackLeft + halfW, Math.min(layout.trackLeft + layout.trackWidth - halfW, x)),
+      y: Math.max(layout.playTop + halfH, Math.min(layout.playTop + layout.playHeight - halfH, y))
+    };
+  }
+
+  function makeThunderBolts(layout) {
+    const count = 3;
+    const minX = layout.trackLeft + THUNDER_WIDTH + 12;
+    const maxX = layout.trackLeft + layout.trackWidth - THUNDER_WIDTH - 12;
+    const span = Math.max(40, maxX - minX);
+    const offset = Math.random() * Math.min(34, span / 4);
+    const centers = [];
+    for (let i = 0; i < count; i++) {
+      const base = minX + (span * (i + 0.5)) / count;
+      centers.push(Math.max(minX, Math.min(maxX, base + (i - 1) * offset + (Math.random() - 0.5) * 20)));
+    }
+    return centers.map((x, i) => ({
+      x,
+      y1: layout.playTop + 36,
+      y2: layout.playTop + layout.playHeight - 24,
+      amp: 18 + Math.random() * 12,
+      phase: Math.random() * Math.PI * 2,
+      width: THUNDER_WIDTH,
+      seed: i
+    }));
+  }
+
+  function startBossSkill(boss, player, layout) {
+    if (!isHellBattle() || phase !== 'boss' || boss.skill) return false;
+    const useThunder = Math.random() < 0.42;
+    boss.skillCd = randomSkillCd();
+    bullets = bullets.filter((b) => b.side !== 'enemy');
+    if (useThunder) {
+      boss.skill = {
+        type: 'thunder',
+        stage: 'warn',
+        t: THUNDER_WARN_SEC,
+        maxT: THUNDER_WARN_SEC,
+        bolts: makeThunderBolts(layout),
+        hit: false
+      };
+      EventLog.showQuick('神罚天雷', '雷痕已现，速避！', 'danger');
+      return true;
+    }
+
+    const ret = { x: boss.x, y: boss.y };
+    const dirs = [
+      [0, -1], [1, 0], [0, 1], [-1, 0],
+      [0.72, -0.72], [0.72, 0.72], [-0.72, 0.72], [-0.72, -0.72]
+    ];
+    const dir = dirs[Math.floor(Math.random() * dirs.length)];
+    const dist = Math.min(layout.trackWidth * 0.18, 54);
+    const atk = clampedBossPos(layout, player.x + dir[0] * dist, player.y + dir[1] * dist, boss);
+    boss.skill = {
+      type: 'slay',
+      stage: 'warn',
+      t: SLAY_WARN_SEC,
+      maxT: SLAY_WARN_SEC,
+      returnX: ret.x,
+      returnY: ret.y,
+      attackX: atk.x,
+      attackY: atk.y,
+      hit: false
+    };
+    const fan = [-35.7, 0, 35.7];
+    fan.forEach((off) => {
+      spawnBall(boss.x, boss.y + boss.h / 2, player.x + off, player.y, bossBulletSpeed(), 'enemy', {
+        source: 'boss_skill',
+        sourceDetail: 'slay_fan_bullet'
+      });
+    });
+    EventLog.showQuick('瞬杀', '伪帝敛弹凝杀，留意身上凶记！', 'danger');
+    return true;
+  }
+
+  function nearCurveHit(player, bolt) {
+    const pb = Player.hitbox(player);
+    const samples = 18;
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      const y = bolt.y1 + (bolt.y2 - bolt.y1) * t;
+      const x = bolt.x
+        + Math.sin(t * Math.PI * 2.2 + bolt.phase) * bolt.amp
+        + Math.sin(t * Math.PI * 5.4 + bolt.phase * 0.7) * bolt.amp * 0.34;
+      const box = { x: x - bolt.width / 2, y: y - 18, w: bolt.width, h: 36 };
+      if (Renderer.aabb(pb, box)) return true;
+    }
+    return false;
+  }
+
+  function updateBossSkill(boss, player, layout, dt) {
+    const skill = boss.skill;
+    if (!skill) return false;
+
+    if (skill.type === 'slay') {
+      if (skill.stage === 'warn') {
+        skill.t -= dt;
+        if (skill.t <= 0) {
+          skill.stage = 'attack';
+          skill.t = SLAY_ATTACK_SEC;
+          skill.maxT = SLAY_ATTACK_SEC;
+          boss.x = skill.attackX;
+          boss.y = skill.attackY;
+        }
+        return true;
+      }
+      if (skill.stage === 'attack') {
+        boss.x = skill.attackX;
+        boss.y = skill.attackY;
+        skill.t -= dt;
+        const strike = {
+          x: boss.x - boss.w * 0.75,
+          y: boss.y - boss.h * 0.75,
+          w: boss.w * 1.5,
+          h: boss.h * 1.5
+        };
+        if (!skill.hit && player.invincible <= 0 && Renderer.aabb(Player.hitbox(player), strike)) {
+          applyPlayerDamage(SLAY_DAMAGE, true, { source: 'boss_skill', sourceDetail: 'slay' });
+          player.invincible = Math.max(player.invincible || 0, hitInvincibleTime());
+          skill.hit = true;
+        }
+        if (skill.t <= 0) {
+          boss.x = skill.returnX;
+          boss.y = skill.returnY;
+          boss.skill = null;
+        }
+        return true;
+      }
+      return true;
+    }
+
+    if (skill.type === 'thunder') {
+      skill.t -= dt;
+      if (skill.stage === 'warn' && skill.t <= 0) {
+        skill.stage = 'strike';
+        skill.t = THUNDER_STRIKE_SEC;
+        skill.maxT = THUNDER_STRIKE_SEC;
+      }
+      if (skill.stage === 'strike') {
+        if (!skill.hit && skill.bolts.some((b) => nearCurveHit(player, b))) {
+          applyPlayerDamage(lightShieldT > 0 ? 1 : THUNDER_DAMAGE, false, { source: 'boss_skill', sourceDetail: 'thunder' });
+          player.invincible = Math.max(player.invincible || 0, hitInvincibleTime());
+          skill.hit = true;
+        }
+        if (skill.t <= 0) boss.skill = null;
+      }
+      return true;
+    }
+    return true;
+  }
+
+  function addDrop(kind, x, y) {
+    drops.push({
+      kind: kind || 'light',
+      x,
+      y,
+      r: kind === 'flame' ? 13 : 14,
+      vy: kind === 'flame' ? 48 : 55,
+      pulse: 0
+    });
+  }
+
+  function isFinalWaveBeforeBoss() {
+    return phase === 'waves' && waveIdx === WAVE_SIZES.length - 1;
+  }
+
+  function tickFinalWaveSkyLight(dt, layout) {
+    if (!isHellBattle() || !isFinalWaveBeforeBoss()) return;
+    if (!finalWaveFlameDropped) {
+      finalWaveFlameDropped = true;
+      const flameMargin = 24;
+      const flameSpan = Math.max(20, layout.trackWidth - flameMargin * 2);
+      const flameX = layout.trackLeft + flameMargin + Math.random() * flameSpan;
+      addDrop('flame', flameX, layout.playTop - 20);
+    }
+    finalWaveSkyLightCd -= dt;
+    if (finalWaveSkyLightCd > 0) return;
+    finalWaveSkyLightCd += FINAL_WAVE_SKY_LIGHT_INTERVAL;
+    if (Math.random() >= FINAL_WAVE_SKY_LIGHT_CHANCE) return;
+    const margin = 22;
+    const span = Math.max(20, layout.trackWidth - margin * 2);
+    const x = layout.trackLeft + margin + Math.random() * span;
+    addDrop('light', x, layout.playTop - 18);
+  }
+
+  function collectSkillEffects(player) {
+    const out = [];
+    const boss = getBoss();
+    if (!boss || !boss.skill) return out;
+    const skill = boss.skill;
+    if (skill.type === 'slay') {
+      if (skill.stage === 'warn') {
+        out.push({
+          type: 'slayMark',
+          x: player.x,
+          y: player.y - player.h * 0.12,
+          t: skill.t,
+          maxT: skill.maxT || SLAY_WARN_SEC
+        });
+      } else if (skill.stage === 'attack') {
+        out.push({
+          type: 'slaySlash',
+          x: boss.x,
+          y: boss.y,
+          t: skill.t,
+          maxT: skill.maxT || SLAY_ATTACK_SEC
+        });
+      }
+    } else if (skill.type === 'thunder') {
+      out.push({
+        type: skill.stage === 'strike' ? 'thunderStrike' : 'thunderWarn',
+        t: skill.t,
+        maxT: skill.maxT,
+        bolts: skill.bolts || []
+      });
+    }
+    return out;
+  }
+
+  function updateBoss(boss, player, layout, dt) {
+    boss.pulse = (boss.pulse || 0) + dt * 3.2;
+    boss.swayT = (boss.swayT || 0) + dt;
+    const cx = layout.trackLeft + layout.trackWidth / 2;
+    const sway = Math.sin(boss.swayT * 1.1) * (layout.trackWidth * 0.22);
+    boss.x = cx + sway;
+    boss.y = layout.playTop + 48 + Math.sin(boss.pulse * 0.5) * 10;
+    clampUnit(boss, layout);
+
+    if (isHellBattle()) {
+      boss.skillCd = Math.max(0, (boss.skillCd || 0) - dt);
+      if (!boss.skill && boss.skillCd <= 0 && startBossSkill(boss, player, layout)) return;
+      if (updateBossSkill(boss, player, layout, dt)) return;
+    }
+
+    boss.fireCd -= dt;
+    if (boss.fireCd <= 0) {
+      boss.fireCd = bossFireMin() + Math.random() * (bossFireMax() - bossFireMin());
+      const spread = bossSpread();
+      const speed = bossBulletSpeed();
+      const by = boss.y + boss.h / 2;
+      spread.forEach((off) => {
+        spawnBall(boss.x, by, player.x + off, player.y, speed, 'enemy', {
+          source: 'boss_bullet',
+          sourceDetail: 'boss_spread'
+        });
+      });
+    }
+
+    boss.minionCd -= dt;
+    if (boss.minionCd <= 0 && countMinions() < bossMaxMinions()) {
+      boss.minionCd = bossMinionInterval() * (0.82 + Math.random() * 0.36);
+      enemies.push(makeMinion(layout, boss.x));
+    }
+  }
+
+  function tick(dt, layout, player, input) {
+    if (!active) return null;
+
+    playerFireCd = Math.max(0, playerFireCd - dt);
+    hitFlash = Math.max(0, hitFlash - dt);
+    flamePowerT = Math.max(0, flamePowerT - dt);
+    lightShieldT = Math.max(0, lightShieldT - dt);
+    if (player.invincible > 0) player.invincible -= dt;
+
+    const mv = input.getMoveVector();
+    let moved = false;
+    if (mv.x !== 0 || mv.y !== 0) {
+      const len = Math.hypot(mv.x, mv.y) || 1;
+      const spd = PLAYER_MOVE_SPEED * dt;
+      const p = Player.clampPos(
+        player, layout,
+        player.x + (mv.x / len) * spd,
+        player.y + (mv.y / len) * spd
+      );
+      player.x = p.x;
+      player.y = p.y;
+      moved = true;
+    }
+    if (!moved && input.isActive()) {
+      const pos = input.getPos();
+      const tx = pos.x - player.x;
+      const ty = pos.y - player.y;
+      const d = Math.hypot(tx, ty);
+      if (d > TOUCH_DEADZONE) {
+        const lerp = Math.min(1, dt * TOUCH_LERP);
+        const target = Player.clampPos(player, layout, pos.x, pos.y);
+        player.x += (target.x - player.x) * lerp;
+        player.y += (target.y - player.y) * lerp;
+      }
+    }
+
+    tryPlayerFire(player);
+
+    if (phase === 'waves') {
+      trySpawnWaves(dt, layout);
+      tickFinalWaveSkyLight(dt, layout);
+      if (spawnCountTotal() >= TOTAL) {
+        while (allySpawned < allyTarget()) spawnAllyReinforcement(layout);
+      }
+      if (spawnCountTotal() >= TOTAL && enemies.length === 0) {
+        beginBossPhase(layout);
+      }
+    } else if (phase === 'boss_bridge') {
+      bossBridgeT -= dt;
+      if (bossBridgeT <= 0) finalizeBossPhase(layout);
+    }
+
+    enemies.forEach((e) => {
+      e.pulse = (e.pulse || 0) + dt * 4;
+      if (e.isBoss) {
+        updateBoss(e, player, layout, dt);
+        return;
+      }
+      if (e.isMinion) {
+        updateMinionMotion(e, player, layout, dt);
+      } else {
+        updateEnemyMotion(e, player, layout, dt);
+      }
+      if (e.isMinion && player.invincible <= 0 && hitFlash <= 0 && Renderer.aabb(Player.hitbox(player), unitBox(e))) {
+        applyPlayerDamage(1, false, { source: 'minion_collision', sourceDetail: 'final_battle_minion' });
+        player.invincible = Math.max(player.invincible || 0, hitInvincibleTime());
+        e.hits = e.maxHits;
+      }
+      e.fireCd -= dt;
+      if (e.fireCd > 0) return;
+      e.fireCd = rollEnemyFireCd();
+      const tx = player.x + (Math.random() - 0.5) * 16;
+      const ty = player.y;
+      spawnBall(e.x, e.y + e.h / 2, tx, ty, ENEMY_BULLET_SPEED, 'enemy', {
+        source: e.isMinion ? 'minion_bullet' : 'enemy_bullet',
+        sourceDetail: e.isMinion ? 'final_battle_minion' : 'final_battle_official'
+      });
+    });
+    enemies = enemies.filter((e) => !(e.isMinion && e.hits >= e.maxHits));
+
+    allies.forEach((a) => {
+      a.pulse = (a.pulse || 0) + dt * 4;
+      const target = nearestEnemy(a);
+      if (target) {
+        const steer = Math.sign(target.x - a.x) * (a.named ? 42 : 30);
+        a.vx = steer;
+        const toY = target.y - a.y;
+        const chase = a.named ? 0.16 : 0.12;
+        a.vy = -ALLY_DRIFT * 0.14 + Math.sign(toY) * Math.min(Math.abs(toY) * chase, 48);
+      } else if (a.entering) {
+        a.vy = -ALLY_DRIFT * 0.55;
+        a.vx *= 0.9;
+      } else {
+        a.vy = -ALLY_DRIFT * 0.25;
+      }
+      if (a.entering && target && a.y <= target.y + 40) a.entering = false;
+      a.x += a.vx * dt;
+      a.y += a.vy * dt;
+      clampUnit(a, layout);
+      a.fireCd -= dt;
+      if (a.fireCd > 0) return;
+      a.fireCd = 1.9 + Math.random() * 1.1;
+      const foe = nearestEnemy(a);
+      if (!foe) return;
+      spawnBall(a.x, a.y - 4, foe.x, foe.y, ALLY_BULLET_SPEED, 'ally');
+    });
+
+    bullets.forEach((b) => {
+      b.pulse = (b.pulse || 0) + dt * 8;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    });
+
+    drops.forEach((d) => {
+      d.pulse = (d.pulse || 0) + dt * 6;
+      d.y += d.vy * dt;
+    });
+
+    const limitX = layout.playAreaW + 60;
+    const top = layout.playTop - 40;
+    const bottom = layout.playTop + layout.playHeight + 40;
+
+    bullets = bullets.filter((b) => {
+      if (b.x < -30 || b.x > limitX || b.y < top || b.y > bottom) return false;
+
+      const br = { x: b.x - b.r, y: b.y - b.r, w: b.r * 2, h: b.r * 2 };
+
+      if (b.side === 'enemy') {
+        if (player.invincible <= 0 && hitFlash <= 0) {
+          const pb = Player.hitbox(player);
+          if (Renderer.aabb(pb, br)) {
+            applyPlayerDamage(b.damage || 1, false, {
+              source: b.source || 'enemy_bullet',
+              sourceDetail: b.sourceDetail || ''
+            });
+            player.invincible = Math.max(player.invincible || 0, hitInvincibleTime());
+            return false;
+          }
+        }
+        for (let i = 0; i < allies.length; i++) {
+          const a = allies[i];
+          if (!Renderer.aabb(unitBox(a), br)) continue;
+          a.hits += 1;
+          if (a.hits >= a.maxHits) allies.splice(i, 1);
+          return false;
+        }
+        return true;
+      }
+
+      if (b.side === 'player' || b.side === 'ally') {
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i];
+          if (!Renderer.aabb(unitBox(e), br)) continue;
+          e.hits += b.damage || 1;
+          if (e.hits >= e.maxHits) {
+            const wasBoss = e.isBoss;
+            const dropChance = lightDropChance(b.side, wasBoss);
+            if (dropChance > 0 && Math.random() < dropChance) {
+              addDrop('light', e.x, e.y);
+            }
+            const flameChance = flameDropChance(b.side, wasBoss);
+            if (flameChance > 0 && Math.random() < flameChance) {
+              addDrop('flame', e.x + (Math.random() - 0.5) * 18, e.y);
+            }
+            enemies.splice(i, 1);
+            if (wasBoss) {
+              bullets = bullets.filter((bl) => bl.side !== 'enemy');
+            }
+          }
+          return false;
+        }
+      }
+      return true;
+    });
+
+    drops = drops.filter((d) => {
+      if (d.y > bottom) return false;
+      const dr = { x: d.x - d.r, y: d.y - d.r, w: d.r * 2, h: d.r * 2 };
+      if (Renderer.aabb(Player.hitbox(player), dr)) {
+        if (d.kind === 'flame') {
+          flamePowerT = FLAME_POWER_DURATION;
+          EventLog.showQuick('炎诏火弹', `伤害+50% · ${FLAME_POWER_DURATION}秒`, 'promote');
+        } else {
+          player.invincible = LIGHT_INVINCIBLE;
+          lightShieldT = LIGHT_INVINCIBLE;
+          EventLog.showQuick('护体神光', `无敌 ${LIGHT_INVINCIBLE} 秒`, 'promote');
+        }
+        return false;
+      }
+      return true;
+    });
+
+    skillEffects = collectSkillEffects(player);
+    if (playerHits >= PLAYER_MAX_HITS) return 'lose';
+    if (phase === 'boss' && !getBoss()) return 'win';
+    return null;
+  }
+
+  function getHud() {
+    const boss = getBoss();
+    return {
+      phase,
+      wave: phase === 'boss' ? 0 : Math.min(waveIdx + 1, WAVE_SIZES.length),
+      waveTotal: WAVE_SIZES.length,
+      enemiesLeft: enemies.length,
+      spawnDone: spawnCountTotal() >= TOTAL,
+      spawned: spawnCountTotal(),
+      total: TOTAL,
+      officialSpawned,
+      minionSpawned,
+      officialTotal: OFFICIAL_TOTAL,
+      minionTotal: MINION_TOTAL,
+      playerHits,
+      playerMaxHits: PLAYER_MAX_HP,
+      playerHp: Math.max(0, PLAYER_MAX_HP - playerHits),
+      playerMaxHp: PLAYER_MAX_HP,
+      hits: playerHits,
+      maxHits: PLAYER_MAX_HP,
+      alliesLeft: allies.length,
+      allySpawned,
+      allyTarget: allyTarget(),
+      fireReady: playerFireCd <= 0,
+      flamePowerLeft: flamePowerT,
+      bossHits: boss ? boss.hits : 0,
+      bossMaxHits: bossMaxHits(),
+      bossActive: !!boss,
+      bossSkill: boss?.skill?.type || '',
+      bossSkillStage: boss?.skill?.stage || '',
+      bossBridgeT: phase === 'boss_bridge' ? bossBridgeT : 0
+    };
+  }
+
+  function getAllies() { return allies; }
+  function getEnemies() { return enemies; }
+  function getBullets() { return bullets; }
+  function getDrops() { return drops; }
+  function getEffects() { return skillEffects; }
+  function getDamageEvents() { return damageEvents.map((e) => ({ ...e })); }
+
+  function getPhase() {
+    return phase;
+  }
+
+  function isWavePhase() {
+    return phase === 'waves';
+  }
+
+  function isBossPhase() {
+    return phase === 'boss';
+  }
+
+  function isBossBridgePhase() {
+    return phase === 'boss_bridge';
+  }
+
+  return {
+    reset, start, tick, isActive, tryPlayerFire, skipToBossPhase,
+    getPhase, isWavePhase, isBossPhase, isBossBridgePhase,
+    getAllies, getEnemies, getBullets, getDrops, getEffects, getDamageEvents, getHud,
+    PLAYER_FIRE_CD, PLAYER_MAX_HITS, PLAYER_MAX_HP
+  };
+})();
+
+
