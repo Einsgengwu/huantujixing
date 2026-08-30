@@ -4,8 +4,6 @@
 
 🎮 **[网页试玩](https://einsgengwu.github.io/huantujixing/)**
 
-🎮 **[冲榜试玩](https://cad-diamonds-motorcycles-guards.trycloudflare.com/huantujixing/index.html)**
-
 ## 玩法简介
 
 - 支持鼠标和触屏操作，角色跟随指针或手指移动
@@ -53,4 +51,4 @@ serve.bat        Windows 本地启动脚本
 
 ## 许可
 
-本项目采用 [MIT License](LICENSE) 开源。
+本项目源代码公开，并采用 [PolyForm Noncommercial License 1.0.0](LICENSE) 授权，仅允许非商业用途下的使用、修改与分发。任何商业用途均须事先取得版权所有者的书面授权。
