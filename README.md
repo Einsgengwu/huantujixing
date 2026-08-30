@@ -4,6 +4,8 @@
 
 🎮 **[网页试玩](https://einsgengwu.github.io/huantujixing/)**
 
+🎮 **[冲榜试玩](https://cad-diamonds-motorcycles-guards.trycloudflare.com/huantujixing/index.html)**
+
 ## 玩法简介
 
 - 支持鼠标和触屏操作，角色跟随指针或手指移动
